@@ -1,0 +1,11 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { containsProvincePoint } from '../frontend/src/utils/province.ts';
+const path = new URL('../data/boundaries/hebei.geojson', import.meta.url);
+const boundary = JSON.parse(fs.readFileSync(path,'utf8')).features[0].geometry;
+for (const [lng,lat] of [[114.32,38.11],[116.26,39.44],[117.07,39.98]]) assert.ok(containsProvincePoint(boundary,lat,lng));
+for (const [lng,lat] of [[116.4,39.9],[117.2,39.12],[113.65,34.75]]) assert.ok(!containsProvincePoint(boundary,lat,lng));
+const hole={type:'Polygon',coordinates:[[[0,0],[4,0],[4,4],[0,4],[0,0]],[[1,1],[3,1],[3,3],[1,3],[1,1]]]};
+assert.ok(containsProvincePoint(hole,.5,.5));
+assert.ok(!containsProvincePoint(hole,2,2));
+console.log('Province point containment: cities, exclave and holes passed');

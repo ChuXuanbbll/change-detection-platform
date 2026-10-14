@@ -1,0 +1,23 @@
+{
+  "sources": [
+    {
+      "url": "https://geo.datav.aliyun.com/areas_v3/bound/130000_full.json",
+      "sha256": "c7e8f6d81bf815b309e081b17325f73134bfa6929332e1c135398e82216f70f7",
+      "file": "hebei-cities-source.geojson"
+    },
+    {
+      "url": "https://geo.datav.aliyun.com/areas_v3/bound/130600_full.json",
+      "sha256": "2a3b23b39ca2691064f88f3cb5c2aa8c3c97d157dae4cf6725900703132aeac9",
+      "file": "hebei-baoding-source.geojson"
+    },
+    {
+      "url": "https://geo.datav.aliyun.com/areas_v3/bound/130100_full.json",
+      "sha256": "556b51cd1f2b058e6e0b3f62939f68891f6f45c6284e6d3bb5fbf87ca4212e7b",
+      "file": "hebei-shijiazhuang-source.geojson"
+    }
+  ],
+  "coordinate_system": "EPSG:4326",
+  "normalization": "Inverse GCJ-02, make_valid, clip to bundled province; subtract independent regions from parent cities",
+  "xiongan_definition": "Union of Rongcheng (130629), Anxin (130632), Xiong (130638); not a surveyed planning boundary",
+  "note": "Public visualization boundaries; not survey-grade. Region IDs are stable application keys."
+}

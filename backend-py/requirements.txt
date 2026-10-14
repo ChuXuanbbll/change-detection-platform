@@ -1,0 +1,16 @@
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.5.0
+rasterio>=1.3.0
+numpy>=1.26.0
+scipy>=1.11.0
+scikit-image>=0.22.0
+shapely>=2.0.0
+pyshp==2.3.1
+requests>=2.31.0
+pillow>=10.0.0
+# 河北遥感变化检测模型（ONNX Runtime GPU；若仅使用 CPU 可改为 onnxruntime）
+onnxruntime-gpu==1.23.2
+
+onnx==1.19.1
+ml_dtypes==0.6.0

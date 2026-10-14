@@ -1,0 +1,185 @@
+"""Local-only imagery endpoints; /wayback retained as a compatibility alias."""
+from pathlib import Path
+from functools import partial
+from typing import Any, List
+from fastapi import APIRouter, HTTPException, Response, Query, Request
+from app.utils.tile_queue import tile_response
+from app.utils.tile_worker import prepare_job
+from pydantic import BaseModel, Field
+from app.fetchers.local import (catalog, crop_images, render_tile, render_mosaic, province,
+                                BoundaryUnavailable, imagery_phases, StaleMosaicVersion, selection_pixels)
+from shapely.geometry import mapping
+from app.fetchers.regions import region_collection, region_feature, display_sources
+
+router = APIRouter(prefix='/py', tags=['local-imagery'])
+
+class LocalFetchRequest(BaseModel):
+    aoi: Any = Field(None, description='WGS84 GeoJSON Polygon，单个无孔闭合环')
+    bounds: List[float] = Field(..., min_length=4, max_length=4)
+    start_date: str = '0001-01-01'
+    end_date: str = '9999-12-31'
+    # Omitted (or zero) retrieves every available phase; retained for API compatibility.
+    max_images: int = Field(0, ge=0, le=20)
+    output_dir: str
+    region_id: str | None = None
+    scene_ids: List[str] | None = None
+
+class SelectionPixelsRequest(BaseModel):
+    aoi: Any = Field(None, description='WGS84 GeoJSON Polygon，单个无孔闭合环')
+    bounds: List[float] = Field(..., min_length=4, max_length=4)
+    region_id: str
+    scene_ids: List[str] = Field(..., min_length=1)
+
+
+@router.post('/local/selection-pixels')
+def get_selection_pixels(req: SelectionPixelsRequest):
+    try:
+        return selection_pixels(req.bounds, req.region_id, req.scene_ids, req.aoi)
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
+    except (BoundaryUnavailable, OSError) as exc:
+        raise HTTPException(503, detail=str(exc)) from exc
+
+
+@router.post('/local/fetch')
+@router.post('/wayback/fetch', deprecated=True)
+def fetch_local(req: LocalFetchRequest):
+    if 'scene_ids' in req.model_fields_set and req.scene_ids is None:
+        raise HTTPException(400, detail='请选择行政区及至少一张影像')
+    if not Path(req.output_dir).is_absolute():
+        raise HTTPException(400, detail='output_dir 必须是绝对路径')
+    try:
+        result = crop_images(req.bounds, req.start_date, req.end_date, req.max_images, req.output_dir,
+                             req.region_id, req.scene_ids, req.aoi)
+        # Confirm the validated AOI so older workers cannot silently crop a box.
+        if req.aoi is not None:
+            result['aoi'] = req.aoi
+        return result
+    except BoundaryUnavailable as exc:
+        raise HTTPException(503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(400, detail='行政区不存在') from exc
+    except OSError as exc:
+        raise HTTPException(503, detail=f'影像目录不可用: {exc}') from exc
+
+@router.get('/local/catalog')
+def list_catalog(refresh: bool = False):
+    try:
+        boundary = province()
+        return {'images': catalog(refresh=refresh), 'bounds': list(boundary.bounds),
+                'boundary': mapping(boundary), 'boundary_mode': 'administrative', 'warning': None}
+    except BoundaryUnavailable as exc:
+        raise HTTPException(503, detail=str(exc)) from exc
+    except (OSError, ValueError) as exc:
+        raise HTTPException(503, detail=f'影像目录不可用: {exc}') from exc
+
+
+@router.get('/local/regions/{region_id}/scenes')
+def list_region_scenes(region_id: str, refresh: bool = False):
+    try:
+        feature = region_feature(region_id)
+        rows = sorted((row for row in catalog(refresh=refresh) if row.get('region_id') == region_id),
+                      key=lambda row: (row.get('date', '9999'), row['file']))
+        return {'region_id': region_id, 'name': feature['properties']['name'], 'scenes': rows,
+                'phases': imagery_phases(rows, region_id)}
+    except KeyError as exc:
+        raise HTTPException(404, detail='行政区不存在') from exc
+    except (BoundaryUnavailable, OSError, ValueError) as exc:
+        raise HTTPException(503, detail=f'影像目录不可用: {exc}') from exc
+
+
+@router.get('/local/regions/{region_id}/mosaic/{z}/{x}/{y}.png')
+async def mosaic_tile_http(request: Request, region_id: str, z: int, x: int, y: int,
+                           scene_ids: str = Query(...), v: str | None = None):
+    prepare = partial(prepare_job, 'mosaic', region_id, None, scene_ids.split(',') if scene_ids else [], z, x, y, v)
+    return await _render_http(request, prepare, 'private, max-age=86400' if v else 'no-cache')
+
+
+def mosaic_tile(region_id: str, z: int, x: int, y: int, scene_ids: str = Query(...), v: str | None = None):
+    try:
+        ids = scene_ids.split(',') if scene_ids else []
+        return Response(render_mosaic(region_id, ids, z, x, y, v), media_type='image/png',
+                        headers={'Cache-Control': 'private, max-age=86400' if v else 'no-cache'})
+    except StaleMosaicVersion as exc:
+        raise HTTPException(409, detail=str(exc), headers={'Cache-Control': 'no-store'}) from exc
+    except KeyError as exc:
+        raise HTTPException(404, detail='行政区不存在') from exc
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
+    except (BoundaryUnavailable, OSError) as exc:
+        raise HTTPException(503, detail=f'影像服务不可用: {exc}') from exc
+
+@router.get('/local/regions')
+def list_regions():
+    try:
+        boundary = province()
+        return {**region_collection(), 'boundary': mapping(boundary), 'bounds': list(boundary.bounds)}
+    except BoundaryUnavailable as exc:
+        raise HTTPException(503, detail=str(exc)) from exc
+
+
+@router.get('/local/regions/{region_id}/imagery')
+def list_region_imagery(region_id: str, year: int | None = Query(None, ge=1900, le=9999)):
+    try:
+        return display_sources(region_id, year)
+    except BoundaryUnavailable as exc:
+        raise HTTPException(503, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(404, detail='行政区或影像清单字段不存在') from exc
+    except (OSError, ValueError, TypeError) as exc:
+        raise HTTPException(503, detail=f'影像目录不可用: {exc}') from exc
+
+
+@router.get('/local/regions/{region_id}/tiles/{scene}/{z}/{x}/{y}.png')
+async def region_tile_http(request: Request, region_id: str, scene: str, z: int, x: int, y: int):
+    return await _render_http(request, partial(prepare_job, 'tile', region_id, scene, None, z, x, y),
+                              'public, max-age=3600')
+
+
+def region_tile(region_id: str, scene: str, z: int, x: int, y: int):
+    try:
+        return Response(render_tile(scene, z, x, y, region_id), media_type='image/png',
+                        headers={'Cache-Control': 'public, max-age=3600'})
+    except BoundaryUnavailable as exc:
+        raise HTTPException(503, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(404, detail='该区域影像不存在') from exc
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
+
+
+@router.get('/wayback/dates', deprecated=True)
+def list_dates():
+    dates = sorted({r['date'] for r in catalog() if r.get('available', True) and r.get('date')})
+    return {'dates': dates, 'count': len(dates), 'date_precision': 'month'}
+
+@router.get('/local/tiles/{scene}/{z}/{x}/{y}.png')
+async def tile_http(request: Request, scene: str, z: int, x: int, y: int):
+    return await _render_http(request, partial(prepare_job, 'tile', None, scene, None, z, x, y),
+                              'public, max-age=3600')
+
+
+def tile(scene: str, z: int, x: int, y: int):
+    try:
+        return Response(render_tile(scene,z,x,y), media_type='image/png', headers={'Cache-Control':'public, max-age=3600'})
+    except BoundaryUnavailable as exc:
+        raise HTTPException(503, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(404, detail='本地影像不存在') from exc
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
+
+
+async def _render_http(request, prepare, cache_control):
+    try:
+        return await tile_response(request, prepare, cache_control)
+    except StaleMosaicVersion as exc:
+        raise HTTPException(409, detail=str(exc), headers={'Cache-Control': 'no-store'}) from exc
+    except KeyError as exc:
+        raise HTTPException(404, detail='行政区或影像不存在') from exc
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
+    except (BoundaryUnavailable, OSError) as exc:
+        raise HTTPException(503, detail=f'影像服务不可用: {exc}', headers={'Cache-Control': 'no-store'}) from exc

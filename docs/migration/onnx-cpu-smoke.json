@@ -1,0 +1,38 @@
+{
+  "providers": [
+    "CPUExecutionProvider"
+  ],
+  "inputs": [
+    {
+      "name": "image_a",
+      "shape": [
+        "batch",
+        3,
+        512,
+        512
+      ],
+      "type": "tensor(float)"
+    },
+    {
+      "name": "image_b",
+      "shape": [
+        "batch",
+        3,
+        512,
+        512
+      ],
+      "type": "tensor(float)"
+    }
+  ],
+  "outputs": [
+    {
+      "shape": [
+        1,
+        2,
+        512,
+        512
+      ],
+      "finite": true
+    }
+  ]
+}

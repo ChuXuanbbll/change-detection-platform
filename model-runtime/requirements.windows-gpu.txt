@@ -1,0 +1,4 @@
+# CUDA 12 / cuDNN 9 DLLs must be installed separately on Windows.
+numpy==2.2.6
+onnxruntime-gpu==1.23.2
+rasterio==1.4.4

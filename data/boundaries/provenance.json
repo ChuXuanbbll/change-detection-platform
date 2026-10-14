@@ -1,0 +1,10 @@
+{
+  "source_url": "https://geo.datav.aliyun.com/areas_v3/bound/130000.json",
+  "source_sha256": "733d068dfb433972d3c16a2ad28478fda7d1576a408bc4c201e1b3689c9499ab",
+  "source_coordinate_system": "GCJ-02 (DataV/AMap map coordinates)",
+  "coordinate_system": "EPSG:4326",
+  "normalization": "10-step inverse GCJ-02 approximation; Shapely make_valid; polygon components only",
+  "source_geometry_valid": false,
+  "polygon_count": 6,
+  "note": "Public visualization boundary, not a cadastral or survey-grade boundary."
+}

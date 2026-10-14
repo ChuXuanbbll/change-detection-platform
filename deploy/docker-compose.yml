@@ -1,0 +1,101 @@
+name: change-detection-platform
+services:
+  nginx:
+    image: change-detection-frontend:local
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.frontend
+    volumes:
+      - shared-data:/data:ro
+    networks:
+      default:
+        ipv4_address: 172.30.88.10
+    ports:
+      - "127.0.0.1:${HTTP_PORT:-80}:80"
+    restart: unless-stopped
+    depends_on:
+      go-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  init-data:
+    image: python:3.13-slim-bookworm
+    volumes:
+      - shared-data:/data
+      - ../backend-go/data:/legacy:ro
+      - ../scripts/relocate_data.py:/relocate_data.py:ro
+    command: ["python", "/relocate_data.py", "/data", "--seed-from", "/legacy"]
+    restart: "no"
+
+  go-api:
+    image: change-detection-go:local
+    build:
+      context: ../backend-go
+    restart: unless-stopped
+    volumes:
+      - shared-data:/data
+    environment:
+      GO_API_PORT: 8080
+      GO_LISTEN_HOST: 0.0.0.0
+      CDP_TRUST_LOCAL_PROXY: "1"
+      PY_ALGO_URL: http://py-algo:8090
+      DATA_DIR: /data
+      UPLOAD_MAX_MB: 2048
+    depends_on:
+      init-data:
+        condition: service_completed_successfully
+      py-algo:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  py-algo:
+    image: change-detection-python:gpu
+    build:
+      context: ..
+      dockerfile: backend-py/Dockerfile
+      target: gpu
+    restart: unless-stopped
+    volumes:
+      - shared-data:/data
+      - ../data/imagery:/opt/assets/imagery:ro
+      - ../data/boundaries:/opt/assets/boundaries:ro
+    environment:
+      DATA_DIR: /data
+      LOCAL_IMAGERY_DIR: /opt/assets/imagery
+      ASSET_DIR: /opt/assets
+      HEBEI_BOUNDARY_FILE: /opt/assets/boundaries/hebei.geojson
+      CHANGE_ONNX_PROVIDER: cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    depends_on:
+      init-data:
+        condition: service_completed_successfully
+    # Detection is synchronous; allow long model jobs without false restarts.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/', timeout=5)"]
+      interval: 60s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+volumes:
+  shared-data:
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.30.88.0/24
+          gateway: 172.30.88.1

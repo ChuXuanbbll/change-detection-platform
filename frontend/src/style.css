@@ -1,0 +1,236 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── 自托管字体：拉丁字母与数字使用科技感字体，中文回落到系统思源/苹方 ── */
+@font-face {
+  font-family: 'Rajdhani';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('./assets/fonts/rajdhani-500.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
+    U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Rajdhani';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('./assets/fonts/rajdhani-600.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
+    U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Rajdhani';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('./assets/fonts/rajdhani-700.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
+    U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Barlow Semi Condensed';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./assets/fonts/barlow-sc-400.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
+    U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Barlow Semi Condensed';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('./assets/fonts/barlow-sc-500.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
+    U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Barlow Semi Condensed';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('./assets/fonts/barlow-sc-600.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
+    U+FEFF, U+FFFD;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  font-family: 'Barlow Semi Condensed', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+}
+
+body {
+  background: #04080f;
+}
+
+@layer components {
+  /* ── 应用骨架 ── */
+  .app-shell {
+    @apply bg-[#071322] text-slate-100;
+  }
+  .app-header {
+    @apply bg-slate-900 border-b border-slate-700;
+  }
+
+  /* ── 面板 / 卡片 ── */
+  .panel {
+    @apply text-slate-100 rounded-lg;
+    background: linear-gradient(180deg, rgba(17, 39, 64, 0.72) 0%, rgba(9, 21, 36, 0.86) 100%);
+    border: 1px solid rgba(74, 132, 176, 0.28);
+    box-shadow: inset 0 1px 0 rgba(126, 206, 240, 0.07);
+    backdrop-filter: blur(6px);
+  }
+  .panel-title {
+    @apply text-sm font-semibold text-slate-100;
+  }
+  .panel-sub {
+    @apply text-xs text-slate-400;
+  }
+
+  /* ── 表单控件 ── */
+  .input {
+    @apply w-full rounded px-2 py-1 text-slate-100;
+    background: rgba(6, 17, 30, 0.72);
+    border: 1px solid rgba(74, 132, 176, 0.32);
+  }
+  .input:focus {
+    outline: none;
+    border-color: #4fd8ef;
+    box-shadow: 0 0 0 1px rgba(79, 216, 239, 0.45), 0 0 14px -4px rgba(79, 216, 239, 0.6);
+  }
+  .input::placeholder {
+    color: #64798f;
+  }
+  .input option {
+    background: #0b1d31;
+    color: #e6f0fa;
+  }
+
+  /* ── 按钮 ── */
+  .btn-primary {
+    @apply rounded font-semibold text-slate-900 transition;
+    background: linear-gradient(180deg, #7ceaff 0%, #35c6e0 100%);
+    border: 1px solid #8bf0ff;
+    box-shadow: 0 0 18px -6px rgba(79, 216, 239, 0.85), inset 0 1px 0 rgba(255, 255, 255, 0.4);
+  }
+  .btn-primary:hover:not(:disabled) {
+    background: linear-gradient(180deg, #97f0ff 0%, #4ad6ee 100%);
+    box-shadow: 0 0 26px -4px rgba(79, 216, 239, 0.95), inset 0 1px 0 rgba(255, 255, 255, 0.5);
+  }
+  .btn-primary:disabled {
+    @apply cursor-not-allowed;
+    background: rgba(60, 96, 122, 0.35);
+    border-color: rgba(90, 130, 158, 0.4);
+    color: #7f97ac;
+    box-shadow: none;
+  }
+  .btn-secondary {
+    @apply rounded text-slate-200 transition;
+    background: rgba(19, 43, 70, 0.7);
+    border: 1px solid rgba(74, 132, 176, 0.32);
+  }
+  .btn-secondary:hover:not(:disabled) {
+    border-color: rgba(79, 216, 239, 0.6);
+    color: #a9eeff;
+    background: rgba(24, 54, 86, 0.8);
+  }
+  .btn-ghost {
+    @apply text-slate-400 transition;
+  }
+  .btn-ghost:hover {
+    @apply text-cyan-300;
+  }
+
+  /* ── 文本 ── */
+  .text-muted {
+    @apply text-slate-400;
+  }
+  .text-faint {
+    @apply text-slate-500;
+  }
+
+  /* ── 边框 / 分隔 ── */
+  .divider-r {
+    @apply border-r border-slate-700/70;
+  }
+  .divider-l {
+    @apply border-l border-slate-700/70;
+  }
+  .divider-b {
+    @apply border-b border-slate-700/70;
+  }
+  .divider-t {
+    @apply border-t border-slate-700/70;
+  }
+
+  /* ── 列表 / 表格 ── */
+  .row-hover {
+    @apply transition-colors;
+  }
+  .row-hover:hover {
+    background: rgba(79, 216, 239, 0.06);
+  }
+  .table-head {
+    @apply bg-slate-900/70 text-slate-400;
+  }
+
+  /* ── 拖拽区 ── */
+  .dropzone {
+    @apply rounded-lg transition;
+    border: 2px dashed rgba(74, 132, 176, 0.4);
+  }
+  .dropzone-active {
+    border-color: #4fd8ef;
+    background: rgba(79, 216, 239, 0.08);
+    box-shadow: inset 0 0 24px -8px rgba(79, 216, 239, 0.6);
+  }
+}
+
+/* ── Leaflet 控件适配深色控制台 ── */
+.leaflet-bar a {
+  background-color: #0f2740;
+  color: #cfe6f7;
+  border-color: #244866;
+}
+.leaflet-bar a:hover {
+  background-color: #1a3a5c;
+  color: #8bf0ff;
+}
+.leaflet-control-attribution {
+  background: rgba(7, 19, 33, 0.75);
+  color: #8ba7c4;
+}
+.leaflet-control-attribution a {
+  color: #4fd8ef;
+}
+
+/* ── 滚动条 ── */
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(74, 132, 176, 0.45);
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(79, 216, 239, 0.6);
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}

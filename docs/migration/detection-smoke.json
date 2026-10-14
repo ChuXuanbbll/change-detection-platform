@@ -1,0 +1,15 @@
+{
+  "mask_path": "C:\\Users\\drizzle\\Documents\\Codex\\2026-10-07\\migrate-the-project-located-at-d\\work\\detection-smoke\\result\\hebei_onnx_mask.tif",
+  "confidence_path": "C:\\Users\\drizzle\\Documents\\Codex\\2026-10-07\\migrate-the-project-located-at-d\\work\\detection-smoke\\result\\hebei_onnx_confidence.tif",
+  "geojson_path": "C:\\Users\\drizzle\\Documents\\Codex\\2026-10-07\\migrate-the-project-located-at-d\\work\\detection-smoke\\result\\change.geojson",
+  "stats": {
+    "changed_pixels": 0,
+    "total_pixels": 1024,
+    "change_ratio": 0.0,
+    "mean_confidence": 0.0,
+    "mean_confidence_all": 0.0,
+    "algorithm": "hebei_onnx",
+    "feature_count": 0,
+    "changed_area_pixels": 0
+  }
+}

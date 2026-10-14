@@ -1,0 +1,24 @@
+{
+  "images": 18,
+  "tasks": 45,
+  "results": 21,
+  "sqlite_integrity": "ok",
+  "missing_image_files": [],
+  "missing_result_files": [
+    "D:\\2026\u7ea7-xxx\\\u53d8\u5316\u68c0\u6d4b\u5e73\u53f0\\change-detection-platform-release\\backend-go\\data\\results\\9be24354-91fc-485c-95e0-8c2243ffc210\\cva_mask.tif",
+    "D:\\2026\u7ea7-xxx\\\u53d8\u5316\u68c0\u6d4b\u5e73\u53f0\\change-detection-platform-release\\backend-go\\data\\results\\9be24354-91fc-485c-95e0-8c2243ffc210\\cva_confidence.tif",
+    "D:\\2026\u7ea7-xxx\\\u53d8\u5316\u68c0\u6d4b\u5e73\u53f0\\change-detection-platform-release\\backend-go\\data\\results\\9be24354-91fc-485c-95e0-8c2243ffc210\\change.geojson",
+    "D:\\2026\u7ea7-xxx\\\u53d8\u5316\u68c0\u6d4b\u5e73\u53f0\\change-detection-platform-release\\backend-go\\data\\results\\434cf2d9-c19d-4b26-87ed-8fbce0e350f7\\hebei_onnx_mask.tif",
+    "D:\\2026\u7ea7-xxx\\\u53d8\u5316\u68c0\u6d4b\u5e73\u53f0\\change-detection-platform-release\\backend-go\\data\\results\\434cf2d9-c19d-4b26-87ed-8fbce0e350f7\\hebei_onnx_confidence.tif",
+    "D:\\2026\u7ea7-xxx\\\u53d8\u5316\u68c0\u6d4b\u5e73\u53f0\\change-detection-platform-release\\backend-go\\data\\results\\434cf2d9-c19d-4b26-87ed-8fbce0e350f7\\change.geojson",
+    "D:\\2026\u7ea7-xxx\\\u53d8\u5316\u68c0\u6d4b\u5e73\u53f0\\change-detection-platform-release\\backend-go\\data\\results\\a462aa51-8112-4b4a-b54a-baa9f1d68145\\hebei_onnx_mask.tif",
+    "D:\\2026\u7ea7-xxx\\\u53d8\u5316\u68c0\u6d4b\u5e73\u53f0\\change-detection-platform-release\\backend-go\\data\\results\\a462aa51-8112-4b4a-b54a-baa9f1d68145\\hebei_onnx_confidence.tif",
+    "D:\\2026\u7ea7-xxx\\\u53d8\u5316\u68c0\u6d4b\u5e73\u53f0\\change-detection-platform-release\\backend-go\\data\\results\\a462aa51-8112-4b4a-b54a-baa9f1d68145\\change.geojson",
+    "D:\\2026\u7ea7-xxx\\\u53d8\u5316\u68c0\u6d4b\u5e73\u53f0\\change-detection-platform-release\\backend-go\\data\\results\\b1d21605-f323-445b-a91a-2b2cbda672b6\\diff_mask.tif",
+    "D:\\2026\u7ea7-xxx\\\u53d8\u5316\u68c0\u6d4b\u5e73\u53f0\\change-detection-platform-release\\backend-go\\data\\results\\b1d21605-f323-445b-a91a-2b2cbda672b6\\diff_confidence.tif",
+    "D:\\2026\u7ea7-xxx\\\u53d8\u5316\u68c0\u6d4b\u5e73\u53f0\\change-detection-platform-release\\backend-go\\data\\results\\b1d21605-f323-445b-a91a-2b2cbda672b6\\change.geojson",
+    "D:\\2026\u7ea7-xxx\\\u53d8\u5316\u68c0\u6d4b\u5e73\u53f0\\change-detection-platform-release\\backend-go\\data\\results\\96750ef1-c838-4822-b0a4-6028e1c617b0\\hebei_onnx_mask.tif",
+    "D:\\2026\u7ea7-xxx\\\u53d8\u5316\u68c0\u6d4b\u5e73\u53f0\\change-detection-platform-release\\backend-go\\data\\results\\96750ef1-c838-4822-b0a4-6028e1c617b0\\hebei_onnx_confidence.tif",
+    "D:\\2026\u7ea7-xxx\\\u53d8\u5316\u68c0\u6d4b\u5e73\u53f0\\change-detection-platform-release\\backend-go\\data\\results\\96750ef1-c838-4822-b0a4-6028e1c617b0\\change.geojson"
+  ]
+}

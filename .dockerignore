@@ -1,0 +1,13 @@
+**/node_modules
+**/.venv*
+**/__pycache__
+**/*.pyc
+**/.git
+**/.cache
+**/dist
+backend-go/data
+data
+TiffGetter
+**/*.log
+**/*.exe
+**/*.db*

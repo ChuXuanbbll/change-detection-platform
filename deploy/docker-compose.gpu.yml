@@ -1,0 +1,15 @@
+# Requires NVIDIA drivers and NVIDIA Container Toolkit on the Docker host.
+services:
+  py-algo:
+    image: change-detection-python:gpu
+    build:
+      target: gpu
+    environment:
+      CHANGE_ONNX_PROVIDER: cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
