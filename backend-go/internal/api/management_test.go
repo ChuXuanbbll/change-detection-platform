@@ -79,6 +79,21 @@ func TestAdministrationRejectsRemoteAndCrossOrigin(t *testing.T) {
 	}
 }
 
+func TestSettingsRedactAndPreserveAIKey(t *testing.T) {
+	old := model.Settings{AI: model.AISettings{APIKey: "sk-a91-secret-647e"}}
+	masked := redactedSettings(old)
+	if masked.AI.APIKey != "sk-a91...647e" {
+		t.Fatalf("unexpected masked key: %q", masked.AI.APIKey)
+	}
+	if mergeSecretSettings(masked, old).AI.APIKey != old.AI.APIKey {
+		t.Fatal("masked key should preserve the stored secret")
+	}
+	newSettings := model.Settings{AI: model.AISettings{APIKey: "sk-new-key"}}
+	if mergeSecretSettings(newSettings, old).AI.APIKey != "sk-new-key" {
+		t.Fatal("new key should replace the stored secret")
+	}
+}
+
 func TestBatchFreezesValidatedModelAndEffectiveParameters(t *testing.T) {
 	db, e := store.Open(filepath.Join(t.TempDir(), "test.db"))
 	if e != nil {

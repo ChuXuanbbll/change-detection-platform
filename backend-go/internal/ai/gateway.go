@@ -62,6 +62,20 @@ func (g *Gateway) SetProvider(provider Provider) {
 		g.providerOverride = true
 	}
 }
+
+// ConfigureProvider updates the managed provider without changing test or
+// embedding overrides installed through SetProvider.
+func (g *Gateway) ConfigureProvider(config ProviderConfig) {
+	if config.Timeout <= 0 {
+		config.Timeout = 45 * time.Second
+	}
+	g.requestMu.Lock()
+	defer g.requestMu.Unlock()
+	g.config = config
+	if !g.providerOverride {
+		g.provider = NewOpenAIProvider(config)
+	}
+}
 func (g *Gateway) SetExecutor(executor Executor) {
 	if executor != nil {
 		g.registry.executor = executor
@@ -100,10 +114,16 @@ func (g *Gateway) Register(group *gin.RouterGroup) {
 }
 
 func (g *Gateway) status(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"configured": g.config.Configured() || g.providerOverride, "model": g.config.Model, "provider": g.config.BaseURL != "" || g.providerOverride})
+	g.requestMu.Lock()
+	config, override := g.config, g.providerOverride
+	g.requestMu.Unlock()
+	c.JSON(http.StatusOK, gin.H{"configured": config.Configured() || override, "model": config.Model, "provider": config.BaseURL != "" || override})
 }
 func (g *Gateway) tools(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"configured": g.config.Configured() || g.providerOverride, "tools": g.registry.Specs()})
+	g.requestMu.Lock()
+	config, override := g.config, g.providerOverride
+	g.requestMu.Unlock()
+	c.JSON(http.StatusOK, gin.H{"configured": config.Configured() || override, "tools": g.registry.Specs()})
 }
 func (g *Gateway) skillsHandler(c *gin.Context) {
 	out := make([]SkillManifest, 0, len(g.skills))
@@ -245,7 +265,10 @@ func (g *Gateway) message(c *gin.Context) {
 }
 
 func (g *Gateway) runConversation(ctx context.Context, session *Session, workflow *Workflow, request MessageRequest, w io.Writer) error {
-	if !g.config.Configured() && !g.providerOverride {
+	g.requestMu.Lock()
+	config, provider, override := g.config, g.provider, g.providerOverride
+	g.requestMu.Unlock()
+	if !config.Configured() && !override {
 		g.emitEvent(workflow, w, "error", map[string]any{"code": "AI_NOT_CONFIGURED", "message": "AI provider is not configured; set AI_API_BASE, AI_API_KEY, and AI_MODEL"})
 		workflow.Status = "failed"
 		return g.repo.upsertWorkflow(*workflow)
@@ -289,7 +312,7 @@ func (g *Gateway) runConversation(ctx context.Context, session *Session, workflo
 		maxSteps = skill.MaxSteps
 	}
 	for step := 0; step <= maxSteps; step++ {
-		response, err := g.provider.Complete(ctx, CompletionRequest{Messages: messages, Tools: tools})
+		response, err := provider.Complete(ctx, CompletionRequest{Messages: messages, Tools: tools})
 		if err != nil {
 			workflow.Status = "failed"
 			_ = g.repo.upsertWorkflow(*workflow)

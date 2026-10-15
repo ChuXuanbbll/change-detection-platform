@@ -9,6 +9,12 @@ type Source struct {
 	Year    *int   `json:"year,omitempty"`
 	Enabled bool   `json:"enabled"`
 }
+type AISettings struct {
+	APIBase   string `json:"api_base"`
+	APIKey    string `json:"api_key"`
+	Model     string `json:"model"`
+	TimeoutMS int    `json:"timeout_ms"`
+}
 type Settings struct {
 	Sources      []Source       `json:"sources"`
 	DefaultModel string         `json:"default_model"`
@@ -16,6 +22,7 @@ type Settings struct {
 	Runtime      map[string]int `json:"runtime"`
 	Tiles        map[string]int `json:"tiles"`
 	Browser      map[string]int `json:"browser"`
+	AI           AISettings     `json:"ai"`
 }
 type Revision struct {
 	ID        int64    `json:"id"`

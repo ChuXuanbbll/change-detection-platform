@@ -167,6 +167,11 @@ func main() {
 	}
 	defer aiGateway.Close()
 	deps.AI = aiGateway
+	// Management is initialized before the gateway so the gateway can safely
+	// receive the persisted provider settings after construction.
+	if revision, e := db.ActiveRevision(); e == nil {
+		management.ConfigureAI(revision.Settings)
+	}
 	api.RegisterRoutes(r, deps)
 	go func() {
 		for attempt := 0; attempt < 10; attempt++ {
