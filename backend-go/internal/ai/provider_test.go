@@ -77,7 +77,7 @@ func TestOpenAIProviderMissingConfigurationIsActionable(t *testing.T) {
 	}
 }
 
-func TestOpenAIProviderConstrainsOnlyRoutingStages(t *testing.T) {
+func TestOpenAIProviderUsesPortableToolChoiceAcrossStages(t *testing.T) {
 	for _, stage := range []string{"skill_selection", "intent", "execution"} {
 		t.Run(stage, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -85,12 +85,11 @@ func TestOpenAIProviderConstrainsOnlyRoutingStages(t *testing.T) {
 				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 					t.Error(err)
 				}
-				if stage == "execution" {
-					if request["tool_choice"] != "auto" {
-						t.Error("execution must allow text completion")
-					}
-				} else if !sameJSON(request["tool_choice"], map[string]any{"type": "function", "function": map[string]any{"name": "route"}}) {
-					t.Error("routing tool was not required")
+				// Model a compatible service that rejects forced function selection.
+				if request["tool_choice"] != "auto" {
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = io.WriteString(w, `{"error":{"code":"invalid_request_error","message":"Forced tool choice is unsupported"}}`)
+					return
 				}
 				_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
 			}))

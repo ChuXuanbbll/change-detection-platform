@@ -122,10 +122,9 @@ func (p *OpenAIProvider) Complete(ctx context.Context, request CompletionRequest
 	payload := map[string]any{"model": p.config.Model, "messages": request.Messages}
 	if len(request.Tools) > 0 {
 		payload["tools"] = request.Tools
+		// Keep tool choice portable across compatible providers; routing output
+		// is still validated and, if necessary, repaired by completeStructuredIntent.
 		payload["tool_choice"] = "auto"
-		if (request.Stage == "intent" || request.Stage == "skill_selection") && len(request.Tools) == 1 {
-			payload["tool_choice"] = map[string]any{"type": "function", "function": map[string]any{"name": request.Tools[0].Function.Name}}
-		}
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
