@@ -320,6 +320,10 @@ func (g *Gateway) message(c *gin.Context) {
 }
 
 func (g *Gateway) runConversation(ctx context.Context, session *Session, workflow *Workflow, request MessageRequest, w io.Writer) error {
+	g.emitEvent(workflow, w, "intent_progress", map[string]any{"stage": "intent", "message": "正在识别操作与区域、时相条件…"})
+	ctx = withIntentProgress(ctx, func(stage string) {
+		g.emitEvent(workflow, w, "intent_progress", map[string]any{"stage": stage, "message": "解析格式未通过校验，正在自动纠正（1/1）；尚未执行操作。"})
+	})
 	intent, err := g.parseIntent(ctx, session, request)
 	if err != nil {
 		return err
@@ -354,7 +358,7 @@ func (g *Gateway) runConversation(ctx context.Context, session *Session, workflo
 		operation = bound
 		intent.Operations[index] = operation
 		session.SkillID = operation.SkillID
-		g.emitEvent(workflow, w, "plan", map[string]any{"message": fmt.Sprintf("执行步骤 %d/%d", index+1, len(intent.Operations)), "skill_id": operation.SkillID, "operation_index": index, "slots": operation.Slots})
+		g.emitEvent(workflow, w, "plan", map[string]any{"message": fmt.Sprintf("步骤 %d/%d：%s", index+1, len(intent.Operations), intentOperationSummary(operation, session.Workspace)), "skill_id": operation.SkillID, "operation_index": index, "slots": operation.Slots})
 		if err := g.runOperation(ctx, session, workflow, request, operation, index == len(intent.Operations)-1, w); err != nil {
 			return g.handleExecutionClarification(ctx, session, workflow, intent, index, err, w)
 		}
@@ -449,7 +453,24 @@ func (g *Gateway) runOperation(ctx context.Context, session *Session, workflow *
 	}
 	tools = append(tools, skillReferenceTool())
 	messages := []ProviderMessage{{Role: "system", Content: systemContent}}
+	// Historical tool outputs may be date-filtered or tied to an obsolete AOI.
+	// Keep conversational context, but require fresh tool evidence each turn.
+	history := *session
+	history.Messages = nil
 	for _, prior := range session.Messages {
+		if prior.WorkflowID != workflow.ID {
+			history.Messages = append(history.Messages, prior)
+		}
+	}
+	messages = append(messages, intentHistory(&history, MessageRequest{})...)
+	hasCurrentUser := false
+	for _, prior := range session.Messages {
+		if prior.WorkflowID != workflow.ID {
+			continue
+		}
+		if prior.Role == "user" {
+			hasCurrentUser = true
+		}
 		if prior.Provider != nil {
 			messages = append(messages, *prior.Provider)
 			continue
@@ -458,7 +479,7 @@ func (g *Gateway) runOperation(ctx context.Context, session *Session, workflow *
 			messages = append(messages, ProviderMessage{Role: prior.Role, Content: prior.Content, ToolCallID: prior.ToolCallID})
 		}
 	}
-	if len(messages) == 1 {
+	if !hasCurrentUser {
 		messages = append(messages, ProviderMessage{Role: "user", Content: request.Text})
 	}
 	maxSteps := 12
@@ -865,6 +886,7 @@ func (g *Gateway) failConversation(ctx context.Context, workflow *Workflow, err 
 		payload["http_status"], payload["request_id"], payload["attempts"], payload["stage"] = providerError.HTTPStatus, providerError.RequestID, providerError.Attempts, providerError.Stage
 	} else if errors.As(err, &intentError) {
 		payload["code"], payload["message"] = intentError.Code, intentError.Message
+		payload["stage"] = intentError.Stage
 	}
 	refs := []map[string]any{}
 	for _, call := range workflow.ToolCalls {

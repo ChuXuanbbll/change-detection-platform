@@ -28,12 +28,38 @@ type IntentOperation struct {
 type IntentError struct {
 	Code    string
 	Message string
+	Stage   string
 }
 
 func (e *IntentError) Error() string { return e.Message }
 
 func invalidIntent() error {
-	return &IntentError{Code: "AI_INTENT_INVALID", Message: "意图解析结果无效，请补充或重新描述需求。"}
+	return &IntentError{Code: "AI_INTENT_INVALID", Message: "返回内容未通过格式或资源校验。请明确要执行的操作、区域和时相；已有任务可在工作区查看。"}
+}
+
+func intentOperationSummary(operation IntentOperation, workspace map[string]any) string {
+	labels := map[string]string{"detect": "提交变化检测", "query": "查询影像目录", "locate": "定位区域", "models": "查询模型", "images": "查询已准备影像", "phase": "查看时相", "query_tasks": "查询检测任务", "status": "查看任务状态", "summary": "查看检测结果", "filter": "筛选变化图斑", "export": "导出检测结果"}
+	label := labels[stringValue(operation.Slots["operation"])]
+	if label == "" {
+		label = "处理请求"
+	}
+	parts := []string{label}
+	if path := dataStrings(operation.Slots, "admin_path"); len(path) > 0 {
+		parts = append(parts, strings.Join(path, "/"))
+	} else if operation.Slots["use_workspace_context"] == true {
+		if name := stringValue(workspace["region_name"]); name != "" {
+			parts = append(parts, name)
+		}
+		if operation.SkillID == "change.detect.v1" && workspace["aoi"] != nil {
+			parts = append(parts, "沿用当前框选")
+		}
+	}
+	if dates := dataStrings(operation.Slots, "phase_dates"); len(dates) > 0 {
+		parts = append(parts, strings.Join(dates, " 与 "))
+	} else if dates := mapValue(operation.Slots["date_range"]); len(dates) > 0 {
+		parts = append(parts, stringValue(dates["start"])+" 至 "+stringValue(dates["end"]))
+	}
+	return strings.Join(parts, "；")
 }
 
 func (g *Gateway) parseIntent(ctx context.Context, session *Session, request MessageRequest) (Intent, error) {
@@ -80,7 +106,8 @@ func (g *Gateway) parseIntent(ctx context.Context, session *Session, request Mes
 	g.requestMu.Lock()
 	provider := g.provider
 	g.requestMu.Unlock()
-	response, err := provider.Complete(ctx, CompletionRequest{
+	var intent Intent
+	err = completeStructuredIntent(ctx, provider, CompletionRequest{
 		Stage: "intent",
 		Messages: []ProviderMessage{
 			{Role: "system", Content: g.intentPromptFor(selected)},
@@ -89,22 +116,15 @@ func (g *Gateway) parseIntent(ctx context.Context, session *Session, request Mes
 		Tools: []ProviderTool{{Type: "function", Function: ProviderFunction{
 			Name: "route_intent", Description: "解析当前用户意图，返回有序操作和已知槽位；不执行任何业务或界面操作。", Parameters: schema,
 		}}},
+	}, func(raw string) error {
+		var decodeErr error
+		intent, decodeErr = g.decodeIntent(raw, schema)
+		return decodeErr
 	})
 	if err != nil {
 		return Intent{}, err
 	}
 	if err := ctx.Err(); err != nil {
-		return Intent{}, err
-	}
-	raw := response.Message.Content
-	if len(response.Message.ToolCalls) > 0 {
-		if len(response.Message.ToolCalls) != 1 || response.Message.ToolCalls[0].Function.Name != "route_intent" {
-			return Intent{}, invalidIntent()
-		}
-		raw = response.Message.ToolCalls[0].Function.Arguments
-	}
-	intent, err := g.decodeIntent(raw, schema)
-	if err != nil {
 		return Intent{}, err
 	}
 	// Opaque IDs must come from this session's user/final context or workspace.
@@ -428,42 +448,87 @@ func (g *Gateway) selectSkills(ctx context.Context, session *Session, request Me
 		ids = append(ids, skill["skill_id"])
 	}
 	schema := map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{"skill_ids": map[string]any{"type": "array", "minItems": 1, "maxItems": 4, "items": map[string]any{"type": "string", "enum": ids}}}, "required": []any{"skill_ids"}}
-	encoded, err := json.Marshal(map[string]any{"input": request.Text, "history": intentHistory(session, request), "pending_intent": session.PendingIntent, "skills": g.skillCatalog()})
+	workspace := session.Workspace
+	if request.Workspace != nil {
+		workspace = request.Workspace
+	}
+	encoded, err := json.Marshal(map[string]any{"input": request.Text, "history": intentHistory(session, request), "workspace": scrubExternal(normalizeJSONValue(workspace)), "pending_intent": session.PendingIntent, "skills": g.skillCatalog()})
 	if err != nil {
 		return nil, invalidIntent()
 	}
 	g.requestMu.Lock()
 	provider := g.provider
 	g.requestMu.Unlock()
-	response, err := provider.Complete(ctx, CompletionRequest{Stage: "skill_selection", Messages: []ProviderMessage{{Role: "system", Content: promptText("selection")}, {Role: "user", Content: string(encoded)}}, Tools: []ProviderTool{{Type: "function", Function: ProviderFunction{Name: "select_skills", Description: "Select relevant skills from metadata only.", Parameters: schema}}}})
+	var selected []string
+	err = completeStructuredIntent(ctx, provider, CompletionRequest{Stage: "skill_selection", Messages: []ProviderMessage{{Role: "system", Content: promptText("selection")}, {Role: "user", Content: string(encoded)}}, Tools: []ProviderTool{{Type: "function", Function: ProviderFunction{Name: "select_skills", Description: "Select relevant skills from metadata only.", Parameters: schema}}}}, func(raw string) error {
+		if len(raw) > 8192 {
+			return invalidIntent()
+		}
+		decoder := json.NewDecoder(strings.NewReader(raw))
+		value, decodeErr := decodeIntentJSON(decoder, 0)
+		if decodeErr != nil || validateJSONSchema(schema, value) != nil {
+			return invalidIntent()
+		}
+		if err := decoder.Decode(new(any)); err != io.EOF {
+			return invalidIntent()
+		}
+		selected = dataStrings(mapValue(value), "skill_ids")
+		seen := map[string]bool{}
+		for _, id := range selected {
+			if seen[id] {
+				return invalidIntent()
+			}
+			seen[id] = true
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	raw := response.Message.Content
-	if len(response.Message.ToolCalls) > 0 {
-		if len(response.Message.ToolCalls) != 1 || response.Message.ToolCalls[0].Function.Name != "select_skills" {
-			return nil, invalidIntent()
-		}
-		raw = response.Message.ToolCalls[0].Function.Arguments
-	}
-	if len(raw) > 8192 {
-		return nil, invalidIntent()
-	}
-	decoder := json.NewDecoder(strings.NewReader(raw))
-	value, err := decodeIntentJSON(decoder, 0)
-	if err != nil || validateJSONSchema(schema, value) != nil {
-		return nil, invalidIntent()
-	}
-	if err := decoder.Decode(new(any)); err != io.EOF {
-		return nil, invalidIntent()
-	}
-	selected := dataStrings(mapValue(value), "skill_ids")
-	seen := map[string]bool{}
-	for _, id := range selected {
-		if seen[id] {
-			return nil, invalidIntent()
-		}
-		seen[id] = true
-	}
 	return selected, nil
+}
+
+type intentProgressKey struct{}
+
+func withIntentProgress(ctx context.Context, callback func(string)) context.Context {
+	return context.WithValue(ctx, intentProgressKey{}, callback)
+}
+
+// Only repair structural output once, before any business tools are exposed.
+// Never echo malformed output back as instructions or relax the closed schema.
+func completeStructuredIntent(ctx context.Context, provider Provider, request CompletionRequest, decode func(string) error) error {
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		response, err := provider.Complete(ctx, request)
+		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		raw := response.Message.Content
+		validCall := true
+		if calls := response.Message.ToolCalls; len(calls) > 0 {
+			validCall = len(calls) == 1 && calls[0].Function.Name == request.Tools[0].Function.Name
+			if validCall {
+				raw = calls[0].Function.Arguments
+			}
+		}
+		if validCall && decode(raw) == nil {
+			return nil
+		}
+		if attempt == 0 {
+			if callback, ok := ctx.Value(intentProgressKey{}).(func(string)); ok {
+				callback(request.Stage)
+			}
+			request.Messages = append(request.Messages, ProviderMessage{Role: "system", Content: "上次返回未通过格式校验。请重新读取原始输入，只调用指定工具一次，严格遵循闭合 schema：字段名、类型、枚举、必填项均须正确，不增加字段，不输出 Markdown。无法判断需求时使用 schema 允许的澄清字段。"})
+		}
+	}
+	label := "需求解析"
+	if request.Stage == "skill_selection" {
+		label = "操作识别"
+	}
+	return &IntentError{Code: "AI_INTENT_INVALID", Stage: request.Stage, Message: label + "返回格式无效，自动纠正一次后仍未通过；本轮未执行任何操作。请明确操作和对象，例如：检测当前框选区域 2025年1月和5月的差异；或查看上次检测结果。"}
 }

@@ -129,6 +129,25 @@ export async function runAiReliabilityChecks({
     return { emit, end: () => response.end(), payload };
   };
   try {
+    {
+      let stream;
+      const { page } = await createPage('intent-feedback', async request => {
+        stream = writer(request, 'intent-feedback-workflow');
+        stream.emit('intent_progress', { stage: 'intent', message: '解析格式未通过校验，正在自动纠正（1/1）；尚未执行操作。' });
+      });
+      await send(page, '检测当前框选');
+      await page.getByText('解析格式未通过校验，正在自动纠正（1/1）；尚未执行操作。', { exact: true }).waitFor();
+      stream.emit('final', { status: 'needs_clarification', message: '要比较哪两个月？当前目录包含 2025-01、2025-03、2025-05。' });
+      stream.end();
+      await page.locator('.ai-turn[data-status="needs_clarification"] .is-final').waitFor();
+      assert.equal(await page.getByText('已完成', { exact: true }).count(), 0);
+      assert.equal(await page.getByText('待补充信息', { exact: true }).count(), 2);
+      assert.equal(await page.getByRole('textbox', { name: '输入给 AI 助手的消息' }).isEnabled(), true);
+      assert.equal(await page.locator('.ai-turn-process').evaluate(node => node.open), false);
+      await page.screenshot({ path: path.join(output, 'intent-clarification.png') });
+      report.checks.push('intent repair progress is visible; clarification is labelled pending input instead of completed and accepts a follow-up');
+      await page.close();
+    }
     for (const [name, viewport, expectedHeight] of [
       ["live-desktop", { width: 1440, height: 900 }, 160],
       ["live-mobile", { width: 390, height: 844 }, 120],

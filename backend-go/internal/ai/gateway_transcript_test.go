@@ -138,7 +138,7 @@ func TestGatewayUIAckTranscriptSurvivesLaterTurnsAndRestart(t *testing.T) {
 			if secondResponse.Code != 200 || !strings.Contains(secondResponse.Body.String(), "event: final") {
 				t.Fatalf("second conversation did not finish: status=%d body=%s", secondResponse.Code, secondResponse.Body.String())
 			}
-			gatewayTranscriptAssertPair(t, provider, 3, testCase.resultStatus, testCase.resultData, testCase.resultError)
+			gatewayTranscriptAssertFreshTurn(t, provider, 3)
 
 			gateway.Close()
 			restored, err := NewGateway(dataDir, []ToolSpec{testSpec()}, testExecutor{})
@@ -161,8 +161,21 @@ func TestGatewayUIAckTranscriptSurvivesLaterTurnsAndRestart(t *testing.T) {
 			if thirdResponse.Code != 200 || !strings.Contains(thirdResponse.Body.String(), "event: final") {
 				t.Fatalf("restored conversation did not finish: status=%d body=%s", thirdResponse.Code, thirdResponse.Body.String())
 			}
-			gatewayTranscriptAssertPair(t, restoredProvider, 1, testCase.resultStatus, testCase.resultData, testCase.resultError)
+			gatewayTranscriptAssertFreshTurn(t, restoredProvider, 1)
 		})
+	}
+}
+
+func gatewayTranscriptAssertFreshTurn(t *testing.T, provider *gatewayTranscriptTestProvider, number int) {
+	t.Helper()
+	request, ok := provider.request(number)
+	if !ok {
+		t.Fatal("missing provider request")
+	}
+	for _, message := range request.Messages {
+		if message.Role == "tool" || len(message.ToolCalls) > 0 {
+			t.Fatal("historical tool results leaked into a new turn")
+		}
 	}
 }
 

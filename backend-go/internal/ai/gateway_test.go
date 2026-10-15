@@ -263,7 +263,7 @@ func TestGatewayDomainWorkflowEventsHonorsLastEventID(t *testing.T) {
 	}
 }
 
-func TestGatewayPersistsToolRepliesForLaterProviderTurns(t *testing.T) {
+func TestGatewayPersistsToolRepliesButRequiresFreshEvidenceInLaterTurns(t *testing.T) {
 	provider := &transcriptProvider{}
 	g, err := NewGateway(t.TempDir(), []ToolSpec{testSpec()}, testExecutor{})
 	if err != nil {
@@ -304,8 +304,21 @@ func TestGatewayPersistsToolRepliesForLaterProviderTurns(t *testing.T) {
 			foundReply = true
 		}
 	}
+	if foundCall || foundReply {
+		t.Fatal("second provider turn inherited historical tool evidence")
+	}
+	stored, _ := g.repo.getSession(session.ID)
+	foundCall, foundReply = false, false
+	for _, message := range stored.Messages {
+		if message.Provider != nil && len(message.Provider.ToolCalls) > 0 && message.Provider.ToolCalls[0].ID == "malformed-1" {
+			foundCall = true
+		}
+		if message.Role == "tool" && message.ToolCallID == "malformed-1" {
+			foundReply = true
+		}
+	}
 	if !foundCall || !foundReply {
-		t.Fatalf("second provider turn lost tool transcript: %#v", secondTurn)
+		t.Fatal("persisted audit transcript lost its paired tool messages")
 	}
 }
 

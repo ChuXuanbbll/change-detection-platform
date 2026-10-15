@@ -98,6 +98,7 @@ function processStatus(turn: AiConversationTurn): string {
   return {
     running: '执行中',
     succeeded: '已完成',
+    needs_clarification: '待补充信息',
     failed: '执行失败',
     cancelled: '已取消',
     interrupted: '连接中断',
@@ -312,12 +313,12 @@ watch(
                 </div>
               </details>
               <article
-                v-if="turn.status === 'succeeded' || turn.status === 'cancelled'"
+                v-if="['succeeded', 'needs_clarification', 'cancelled'].includes(turn.status)"
                 class="ai-message is-final"
                 aria-live="polite"
               >
                 <div class="ai-message-meta">
-                  {{ turn.status === 'cancelled' ? '已取消' : '结果' }}
+                  {{ turn.status === 'cancelled' ? '已取消' : turn.status === 'needs_clarification' ? '待补充信息' : '结果' }}
                 </div>
                 <div class="ai-markdown" v-html="renderAiMarkdown(turn.result || '处理完成')" />
               </article>

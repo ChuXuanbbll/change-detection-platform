@@ -17,6 +17,9 @@ export interface AiWorkspaceContext {
   region_name?: string;
   detection?: { model_id: string; config_revision: number; settings: Record<string, number> };
   phases?: Array<{ id: string; month: string; scene_ids: string[] }>;
+  available_phases?: Array<{ id: string; month: string; scene_ids: string[] }>;
+  catalog_status?: 'loading' | 'error' | 'ready';
+  selection_error?: string;
   active_phase?: string;
   task?: { status: string; progress: number; message?: string };
 }

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 export async function runAiDetectionChecks({ browser, url, fixtureForPage, report, region, bounds, polygon }) {
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   page.setDefaultTimeout(15000);
-  const phases = ['2025-03', '2025-05', '2025-07', '2025-09'].map((month, i) => ({
+  const phases = ['2025-01', '2025-03', '2025-05', '2025-07', '2025-09', '2025-11'].map((month, i) => ({
     id: `detect-phase-${i}`, region_id: region.id, month, available: true, version: 'v1', bounds,
     scenes: [{ id: `detect-scene-${i}`, region_id: region.id, region: region.properties.name,
       date: month, date_precision: 'month', available: true, bounds, version: 'v1' }],
@@ -58,8 +58,37 @@ export async function runAiDetectionChecks({ browser, url, fixtureForPage, repor
     await page.goto(url);
     await page.getByRole('button', { name: '打开 AI 助手' }).click();
     assert.equal((await send('select_region', { region_id: region.id })).status, 'applied');
-    assert.equal((await send('load_phases', { phase_ids: phases.map(phase => phase.id) })).status, 'applied');
+    assert.equal((await send('load_phases', { phase_ids: [phases[2].id, phases[5].id] })).status, 'applied');
     assert.equal((await send('set_existing_aoi', { aoi: polygon, bounds, source: 'workspace' })).status, 'applied');
+    assert.deepEqual(acks.at(-1).workspace.aoi, polygon, 'explicit polygons stay unchanged');
+    assert.equal(acks.at(-1).workspace.available_phases.length, 6);
+    assert.deepEqual(acks.at(-1).workspace.phases.map(phase => phase.month), ['2025-05', '2025-11']);
+    // Reproduce the reported rectangle path using real pointer events, rather
+    // than injecting a polygon (which hid this regression in earlier tests).
+    await page.getByRole('button', { name: '关闭 AI 助手', exact: true }).click();
+    const root = page.locator('[data-map-workspace]');
+    await page.waitForTimeout(900);
+    await root.evaluate((node, box) => {
+      node.__vueParentComponent.setupState.map.fitBounds([[box[1], box[0]], [box[3], box[2]]], { animate: false, padding: [100, 100] });
+    }, bounds);
+    const screen = (x, y) => root.evaluate((node, position) => {
+      const map = node.__vueParentComponent.setupState.map;
+      const point = map.latLngToContainerPoint([position[1], position[0]]);
+      const rect = map.getContainer().getBoundingClientRect();
+      return { x: rect.left + point.x, y: rect.top + point.y };
+    }, [bounds[0] + (bounds[2]-bounds[0])*x, bounds[1] + (bounds[3]-bounds[1])*y]);
+    await page.getByRole('button', { name: '框选区域', exact: true }).click();
+    const start = await screen(.25, .25), end = await screen(.75, .75);
+    await page.mouse.move(start.x, start.y); await page.mouse.down();
+    await page.mouse.move(end.x, end.y, { steps: 8 }); await page.mouse.up();
+    assert.equal(await root.evaluate(node => node.__vueParentComponent.props.selectionGeometry), null, 'rectangle editor still uses bounds');
+    await page.getByRole('button', { name: '打开 AI 助手' }).click();
+    assert.equal((await send('select_region', { region_id: region.id }, { fresh: true })).status, 'applied');
+    const rectangleAoi = acks.at(-1).workspace.aoi;
+    assert.equal(rectangleAoi?.type, 'Polygon', 'drawn rectangle must become a valid AI AOI');
+    assert.equal(rectangleAoi.coordinates[0].length, 5);
+    assert.equal(acks.at(-1).workspace.catalog_status, 'ready');
+    assert.equal(acks.at(-1).workspace.selection_error, undefined);
     const lastRevision = acks.at(-1).context_revision;
     assert.equal((await send('select_region', { region_id: region.id })).status, 'applied');
     assert.equal(acks.at(-1).context_revision, lastRevision, 'no-op action must preserve revision');
@@ -67,15 +96,16 @@ export async function runAiDetectionChecks({ browser, url, fixtureForPage, repor
     await page.getByRole('button', { name: '关闭 AI 助手', exact: true }).click();
     await page.locator('label').filter({ hasText: '变化阈值' }).locator('input').fill('0.73');
     await page.getByRole('button', { name: '打开 AI 助手' }).click();
-    const stale = await send('submit_detection', { phase_dates: ['2025-03','2025-09'] });
+    const stale = await send('submit_detection', { phase_dates: ['2025-01','2025-05'] });
     assert.equal(stale.status, 'rejected'); assert.equal(stale.error.code, 'UI_CONTEXT_STALE');
     assert.equal(preparations.length, 0);
-    const submitted = await send('submit_detection', { phase_dates: ['2025-03','2025-09'] });
+    const submitted = await send('submit_detection', { phase_dates: ['2025-01','2025-05'] });
     assert.equal(submitted.status, 'applied', JSON.stringify(submitted));
     assert.equal(submitted.result.task_id, 'detect-task-1'); assert.equal(submitted.result.pair_count, 1);
-    assert.deepEqual(submitted.workspace.phases.map(phase => phase.month), ['2025-03','2025-09']);
-    assert.deepEqual(preparations[0].scene_ids, ['detect-scene-0','detect-scene-3']);
-    assert.deepEqual(preparations[0].aoi, polygon);
+    assert.deepEqual(submitted.workspace.phases.map(phase => phase.month), ['2025-01','2025-05']);
+    assert.deepEqual(submitted.workspace.available_phases.map(phase => phase.month), phases.map(phase => phase.month));
+    assert.deepEqual(preparations[0].scene_ids, ['detect-scene-0','detect-scene-2']);
+    assert.deepEqual(preparations[0].aoi, rectangleAoi);
     assert.equal(preparations[0].params.threshold, 0.73);
     assert.equal(preparations[0].model_id, 'fixture-model'); assert.equal(preparations[0].config_revision, 1);
     assert.equal(submissions.length, 1);
@@ -91,7 +121,7 @@ export async function runAiDetectionChecks({ browser, url, fixtureForPage, repor
     assert.deepEqual(submissions[1].params, submissions[0].params);
     assert.equal(bodies.at(-1).workspace.detection.settings.threshold, 0.73);
     report.checks.push('acknowledged revisions chain without phantom bumps; no-op preserves revision; panel edits reject stale submit');
-    report.checks.push('four catalog phases resolve to two explicit dates; shared AI/button submission retains AOI and edited parameters; duplicate task blocked');
+    report.checks.push('real rectangle drawing yields valid AOI; six catalog phases remain visible with only May/November loaded; January/May submission retains rectangle and edited parameters; duplicate task blocked');
   } finally { await page.close(); }
 }
 

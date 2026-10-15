@@ -484,8 +484,23 @@ func TestGatewayCancelledWorkerMustExitBeforeNextTurnAndRepairsTranscript(t *tes
 			}
 		}
 	}
-	if callCount != 1 || replyCount != 1 || userCount != 2 {
+	if callCount != 0 || replyCount != 0 || userCount != 2 {
 		t.Fatalf("transcript calls/replies/users=%d/%d/%d", callCount, replyCount, userCount)
+	}
+	// Cancellation still repairs the persisted audit transcript; a new turn
+	// must not reuse that old evidence as current workspace state.
+	persistedReply := false
+	for _, message := range stored.Messages {
+		if message.Role == "tool" && message.ToolCallID == "cancelled-tool-call" {
+			var result Result
+			if json.Unmarshal([]byte(message.Content), &result) != nil || result.Error == nil || result.Error.Code != "AI_CANCELLED" {
+				t.Fatalf("cancelled call lost its persisted error: %s", message.Content)
+			}
+			persistedReply = true
+		}
+	}
+	if !persistedReply {
+		t.Fatal("cancelled call was not repaired in storage")
 	}
 	finalCount := 0
 	for _, message := range stored.Messages {

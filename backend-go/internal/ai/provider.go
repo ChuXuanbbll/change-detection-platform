@@ -123,6 +123,9 @@ func (p *OpenAIProvider) Complete(ctx context.Context, request CompletionRequest
 	if len(request.Tools) > 0 {
 		payload["tools"] = request.Tools
 		payload["tool_choice"] = "auto"
+		if (request.Stage == "intent" || request.Stage == "skill_selection") && len(request.Tools) == 1 {
+			payload["tool_choice"] = map[string]any{"type": "function", "function": map[string]any{"name": request.Tools[0].Function.Name}}
+		}
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

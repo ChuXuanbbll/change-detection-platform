@@ -53,7 +53,7 @@ export interface AiTimelineEntry {
   phase?: 'process' | 'final';
 }
 
-export type AiTurnStatus = 'running' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted';
+export type AiTurnStatus = 'running' | 'succeeded' | 'needs_clarification' | 'failed' | 'cancelled' | 'interrupted';
 
 export interface AiConversationTurn {
   id: string;
@@ -120,6 +120,8 @@ function actionText(value: unknown, fallback: string): string {
       stringValue(value.message) || stringValue(value.detail) || stringValue(value.name);
     if (message) return message;
     const tool = stringValue(value.tool);
+    if (isRecord(value.error) && stringValue(value.error.message))
+      return `${tool ? `${tool}：` : ''}${value.error.message}`;
     if (tool)
       return `${tool} · ${value.status === 'pending' ? '已提交，处理中' : value.status === 'error' ? '调用失败' : fallback}`;
   }
@@ -243,9 +245,20 @@ export function useAiAssistant(): AiAssistant {
         month: phase.month,
         scene_ids: phase.scenes.map((scene) => scene.id),
       })),
+      available_phases: workspaceStore.catalogPhases.value
+        .filter((phase) => phase.available)
+        .map((phase) => ({
+          id: phase.id,
+          month: phase.month,
+          scene_ids: phase.scenes.filter((scene) => scene.available).map((scene) => scene.id),
+        })),
+      catalog_status: workspaceStore.catalogLoading.value || workspaceStore.indexLoading.value
+        ? 'loading'
+        : workspaceStore.catalogError.value || workspaceStore.indexError.value ? 'error' : 'ready',
+      selection_error: workspaceStore.selectionError.value || undefined,
       active_phase: workspaceStore.activeMonth.value || undefined,
       bounds: area ? [area.west, area.south, area.east, area.north] : undefined,
-      aoi: workspaceStore.selectedGeometry.value || undefined,
+      aoi: workspaceStore.detectionAoi.value || undefined,
       task_id: workspaceStore.currentTaskId.value || undefined,
       detection: workspaceStore.getDetectionSelection() ? { model_id: workspaceStore.selectedModel.value, config_revision: workspaceStore.getDetectionSelection()!.config_revision, settings: { ...workspaceStore.detectionSettings } } : undefined,
       task: task
@@ -269,6 +282,8 @@ export function useAiAssistant(): AiAssistant {
       page: workspace.value.page,
       region_id: workspace.value.region_id,
       phase_ids: workspace.value.phase_ids,
+      available_phases: workspace.value.available_phases,
+      catalog_status: workspace.value.catalog_status,
       bounds: workspace.value.bounds,
       aoi: workspace.value.aoi,
       task_id: workspace.value.task_id,
@@ -421,9 +436,9 @@ export function useAiAssistant(): AiAssistant {
     open.value = !open.value;
   }
 
-  function finishTurn(turn: AiConversationTurn, text: string): void {
+  function finishTurn(turn: AiConversationTurn, text: string, status?: string): void {
     turn.result = text;
-    turn.status = 'succeeded';
+    turn.status = status === 'needs_clarification' ? 'needs_clarification' : 'succeeded';
     turn.error = '';
     turn.canReconnect = false;
     const lastAssistant = [...turn.entries].reverse().find((entry) => entry.kind === 'assistant');
@@ -472,6 +487,9 @@ export function useAiAssistant(): AiAssistant {
       case 'plan':
         append('plan', actionText(payload, '已生成执行计划'), payload, turn);
         return;
+      case 'intent_progress':
+        append('progress', actionText(payload, '正在解析需求'), payload, turn);
+        return;
       case 'tool_started':
         append('tool', actionText(payload, '正在调用工具…'), payload, turn);
         return;
@@ -499,6 +517,7 @@ export function useAiAssistant(): AiAssistant {
             [...turn.entries].reverse().find((entry) => entry.kind === 'assistant')?.text ||
             turn.result ||
             '处理完成',
+          stringValue(record?.status),
         );
         return;
       case 'cancelled':

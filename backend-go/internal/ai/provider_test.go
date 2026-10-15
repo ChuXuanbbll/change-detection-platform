@@ -77,6 +77,32 @@ func TestOpenAIProviderMissingConfigurationIsActionable(t *testing.T) {
 	}
 }
 
+func TestOpenAIProviderConstrainsOnlyRoutingStages(t *testing.T) {
+	for _, stage := range []string{"skill_selection", "intent", "execution"} {
+		t.Run(stage, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var request map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Error(err)
+				}
+				if stage == "execution" {
+					if request["tool_choice"] != "auto" {
+						t.Error("execution must allow text completion")
+					}
+				} else if !sameJSON(request["tool_choice"], map[string]any{"type": "function", "function": map[string]any{"name": "route"}}) {
+					t.Error("routing tool was not required")
+				}
+				_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+			}))
+			defer server.Close()
+			_, err := providerWithoutWait(server.URL).Complete(context.Background(), CompletionRequest{Stage: stage, Tools: []ProviderTool{{Type: "function", Function: ProviderFunction{Name: "route"}}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestOpenAIProviderRetriesSameCompletionAndObservesWait(t *testing.T) {
 	var requests [][]byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

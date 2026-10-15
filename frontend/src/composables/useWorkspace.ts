@@ -2,6 +2,7 @@ import { computed, inject, provide, reactive, ref, watch, onUnmounted, type Inje
 import { models, settingsState, refreshSettings } from '../utils/settings';
 import { useDetection, type ResultOverlayPayload } from './useDetection';
 import type { AreaBounds, AreaPolygon } from '../utils/api';
+import { polygonFromPoints, rectangleEditPoints } from '../utils/selectionGeometry';
 import {
   getRegionData,
   type RegionFeature,
@@ -79,6 +80,21 @@ function createWorkspace() {
     selectedGeometry.value = bounds && geometry ? JSON.parse(JSON.stringify(geometry)) : null;
   }
   const selectedRegion = ref<RegionFeature | null>(null);
+  // A null editor geometry denotes a rectangle, not an absent selection.
+  // Preserve its administrative intersection when passing it to detection/AI.
+  const detectionAoi = computed<AreaPolygon | null>(() => {
+    if (!selectedArea.value) return null;
+    if (selectedGeometry.value) return selectedGeometry.value;
+    if (!selectedRegion.value) return null;
+    const points = rectangleEditPoints(selectedArea.value, selectedRegion.value.geometry);
+    return points ? polygonFromPoints(points) : null;
+  });
+  const selectionError = computed(() => {
+    if (!selectedArea.value) return '请先在地图框选检测区域';
+    if (!detectionAoi.value)
+      return '框选与行政区相交后包含多个分离区域或孔洞，请缩小框选或绘制单一无孔多边形';
+    return '';
+  });
   const catalogPhases = ref<ImageryPhase[]>([]);
   const loadedPhaseIds = ref<string[]>([]);
   const imageryPhases = computed(() =>
@@ -216,8 +232,9 @@ function createWorkspace() {
     const region = selectedRegion.value;
     if (!region || (request.region_id && request.region_id !== region.id))
       return fail('请先选择本次检测的行政区');
-    if (!selectedArea.value || !selectedGeometry.value) fail('请先在地图框选有效检测区域');
-    if (request.aoi && JSON.stringify(request.aoi) !== JSON.stringify(selectedGeometry.value))
+    const aoi = detectionAoi.value;
+    if (!aoi) return fail(selectionError.value);
+    if (request.aoi && JSON.stringify(request.aoi) !== JSON.stringify(aoi))
       fail('本次指定范围与当前框选不同，请先确认检测区域');
     const available = catalogPhases.value.filter(
       (phase) => phase.available && phase.region_id === region.id,
@@ -239,7 +256,8 @@ function createWorkspace() {
             ? phase.month === date
             : phase.scenes.every((scene) => scene.date_precision === 'day' && scene.date === date),
         );
-        if (matches.length !== 1) fail(`时相 ${date} 不存在或日期精度不匹配，请确认可用时相`);
+        if (matches.length !== 1)
+          fail(`时相 ${date} 不存在或日期精度不匹配；当前目录可用时相：${available.map((phase) => phase.month).join('、') || '无'}`);
         return matches[0];
       });
     } else if (request.phase_ids?.length) {
@@ -343,7 +361,7 @@ function createWorkspace() {
       {
         region_id: region.id,
         scene_ids: scenes.map((scene) => scene.id),
-        aoi: selectedGeometry.value!,
+        aoi,
       },
       isCurrent,
     );
@@ -421,6 +439,8 @@ function createWorkspace() {
     submitDetection,
     selectedArea,
     selectedGeometry,
+    detectionAoi,
+    selectionError,
     selectionEditing,
     setSelectedArea,
     selectedPairKey,
