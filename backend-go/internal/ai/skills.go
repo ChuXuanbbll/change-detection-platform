@@ -1,27 +1,33 @@
 package ai
 
 import (
+	"bytes"
 	"embed"
 	"fmt"
+	"io/fs"
+	"os"
+	"path"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
-//go:embed skills/*.yaml
+//go:embed skills prompts
 var skillFiles embed.FS
 
 type SkillManifest struct {
-	ID                 string            `yaml:"id" json:"id"`
-	Version            string            `yaml:"version" json:"version"`
-	Description        string            `yaml:"description" json:"description"`
-	InputSchema        map[string]any    `yaml:"input_schema" json:"input_schema"`
-	OutputSchema       map[string]any    `yaml:"output_schema" json:"output_schema"`
-	AllowedTools       []string          `yaml:"allowed_tools" json:"allowed_tools"`
-	MaxSteps           int               `yaml:"max_steps" json:"max_steps"`
-	ClarificationRules []string          `yaml:"clarification_rules" json:"clarification_rules"`
-	FailureMap         map[string]string `yaml:"failure_map" json:"failure_map"`
-	Steps              []SkillStep       `yaml:"steps" json:"steps"`
+	Name         string            `yaml:"-" json:"name"`
+	Body         string            `yaml:"-" json:"-"`
+	References   map[string]string `yaml:"-" json:"-"`
+	ID           string            `yaml:"id" json:"id"`
+	Version      string            `yaml:"version" json:"version"`
+	Description  string            `yaml:"description" json:"description"`
+	InputSchema  map[string]any    `yaml:"input_schema" json:"input_schema"`
+	OutputSchema map[string]any    `yaml:"output_schema" json:"output_schema"`
+	AllowedTools []string          `yaml:"allowed_tools" json:"allowed_tools"`
+	MaxSteps     int               `yaml:"max_steps" json:"max_steps"`
+	Steps        []SkillStep       `yaml:"steps" json:"steps"`
 }
 
 type SkillStep struct {
@@ -32,22 +38,72 @@ type SkillStep struct {
 }
 
 func loadSkillManifests() (map[string]SkillManifest, error) {
+	if directory := strings.TrimSpace(os.Getenv("AI_SKILLS_DIR")); directory != "" {
+		return loadSkillPackages(os.DirFS(directory), ".")
+	}
+	return loadSkillPackages(skillFiles, "skills")
+}
+
+// runtime.yaml is a platform extension (schemas and permissions), not Skill prose.
+func loadSkillPackages(source fs.FS, root string) (map[string]SkillManifest, error) {
 	result := make(map[string]SkillManifest)
-	entries, err := skillFiles.ReadDir("skills")
+	entries, err := fs.ReadDir(source, root)
 	if err != nil {
 		return nil, err
 	}
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".yaml") {
+		if !entry.IsDir() {
 			continue
 		}
-		data, err := skillFiles.ReadFile("skills/" + entry.Name())
+		folder := path.Join(root, entry.Name())
+		data, err := fs.ReadFile(source, path.Join(folder, "runtime.yaml"))
 		if err != nil {
 			return nil, err
 		}
 		var skill SkillManifest
-		if err := yaml.Unmarshal(data, &skill); err != nil {
+		decoder := yaml.NewDecoder(bytes.NewReader(data))
+		decoder.KnownFields(true)
+		if err := decoder.Decode(&skill); err != nil {
 			return nil, fmt.Errorf("skill %s: %w", entry.Name(), err)
+		}
+		document, err := fs.ReadFile(source, path.Join(folder, "SKILL.md"))
+		if err != nil {
+			return nil, err
+		}
+		parts := strings.SplitN(strings.ReplaceAll(string(document), "\r\n", "\n"), "---\n", 3)
+		if len(parts) != 3 || parts[0] != "" {
+			return nil, fmt.Errorf("skill %s: invalid frontmatter", entry.Name())
+		}
+		var metadata struct {
+			Name        string `yaml:"name"`
+			Description string `yaml:"description"`
+		}
+		if err := yaml.Unmarshal([]byte(parts[1]), &metadata); err != nil {
+			return nil, err
+		}
+		if metadata.Name != entry.Name() || strings.TrimSpace(metadata.Description) == "" || strings.TrimSpace(parts[2]) == "" {
+			return nil, fmt.Errorf("skill %s: missing name, description or body", entry.Name())
+		}
+		skill.Name, skill.Description, skill.Body = metadata.Name, metadata.Description, strings.TrimSpace(parts[2])
+		skill.References = map[string]string{}
+		if err := fs.WalkDir(source, folder, func(file string, item fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			rel := strings.TrimPrefix(file, folder+"/")
+			if !item.IsDir() && strings.HasPrefix(rel, "references/") && strings.HasSuffix(rel, ".md") {
+				content, err := fs.ReadFile(source, file)
+				if err != nil {
+					return err
+				}
+				if len(content) > 32<<10 {
+					return fmt.Errorf("reference too large: %s", rel)
+				}
+				skill.References[rel] = string(content)
+			}
+			return nil
+		}); err != nil {
+			return nil, err
 		}
 		if skill.ID == "" || skill.Version == "" {
 			return nil, fmt.Errorf("skill %s missing id/version", entry.Name())
@@ -58,7 +114,13 @@ func loadSkillManifests() (map[string]SkillManifest, error) {
 		if skill.MaxSteps <= 0 {
 			skill.MaxSteps = 8
 		}
+		if _, exists := result[skill.ID]; exists {
+			return nil, fmt.Errorf("duplicate skill %s", skill.ID)
+		}
 		result[skill.ID] = skill
+	}
+	if len(result) == 0 {
+		return nil, fmt.Errorf("no Skill packages found in %s", root)
 	}
 	return result, nil
 }
@@ -131,8 +193,27 @@ func validateSkillManifest(skill SkillManifest) error {
 	if skill.MaxSteps > 0 && skill.MaxSteps < len(skill.Steps) {
 		return fmt.Errorf("max_steps is smaller than the declared step count")
 	}
-	if skill.ClarificationRules == nil || skill.FailureMap == nil {
-		return fmt.Errorf("clarification_rules and failure_map are required")
-	}
 	return nil
+}
+
+func promptText(name string) string {
+	data, err := skillFiles.ReadFile("prompts/" + name + ".md")
+	if err != nil {
+		panic(err)
+	} // Embedded, fixed application resources.
+	return string(data)
+}
+
+func (g *Gateway) skillCatalog() []map[string]any {
+	ids := make([]string, 0, len(g.skills))
+	for id := range g.skills {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out := make([]map[string]any, 0, len(ids))
+	for _, id := range ids {
+		skill := g.skills[id]
+		out = append(out, map[string]any{"skill_id": id, "name": skill.Name, "description": skill.Description})
+	}
+	return out
 }

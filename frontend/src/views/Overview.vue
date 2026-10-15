@@ -20,11 +20,10 @@ const {
   taskError,
   batchMessage,
   overlayMsg,
-  submitTask,
+  submitDetection,
   selectedRegion,
   catalogPhases,
   loadedPhaseIds,
-  loadedScenes,
   activeMonth,
   imageryPhases,
   activePhase,
@@ -36,7 +35,6 @@ const {
   removePhase,
   closePhase,
 } = useWorkspace();
-const algorithm = ref<InstanceType<typeof AlgorithmForm> | null>(null);
 const map = ref<InstanceType<typeof MapBasemap> | null>(null);
 let rendered = 0;
 let active = true;
@@ -104,11 +102,7 @@ function detectLoaded() {
     imageryPhases.value.length < 2
   )
     return;
-  void submitTask(() => algorithm.value?.getSelected(), selectedArea.value, {
-    region_id: selectedRegion.value.id,
-    scene_ids: loadedScenes.value.map((scene) => scene.id),
-    aoi: selectedGeometry.value ?? undefined,
-  });
+  void submitDetection().catch(() => {});
 }
 </script>
 <template>
@@ -178,7 +172,7 @@ function detectLoaded() {
           @area="areaChanged"
           @locate="locate"
         />
-        <AlgorithmForm ref="algorithm" />
+        <AlgorithmForm />
       </fieldset>
       <button
         class="btn-primary submit-detection"

@@ -97,8 +97,14 @@ type MessageRequest struct {
 }
 
 type ActionAck struct {
-	Status          string         `json:"status"`
-	ContextRevision string         `json:"context_revision,omitempty"`
-	Workspace       map[string]any `json:"workspace,omitempty"`
-	Error           *ToolError     `json:"error,omitempty"`
+	Status          string               `json:"status"`
+	ContextRevision string               `json:"context_revision,omitempty"`
+	Workspace       map[string]any       `json:"workspace,omitempty"`
+	Error           *ToolError           `json:"error,omitempty"`
+	Result          *DetectionSubmission `json:"result,omitempty"`
+}
+
+type DetectionSubmission struct {
+	TaskID    string `json:"task_id"`
+	PairCount int    `json:"pair_count"`
 }

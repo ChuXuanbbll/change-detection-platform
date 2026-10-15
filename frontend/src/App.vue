@@ -69,9 +69,7 @@ watch(
         </RouterLink>
       </nav>
       <AiAssistant :visible="route.path === '/overview'" />
-      <div class="nav-footer">
-        <span class="signal-dot" />遥感变化检测<br /><small>同一片土地 · 不同时刻?</small>
-      </div>
+
     </aside>
     <div class="app-workspace">
       <header class="workspace-header">

@@ -197,3 +197,147 @@ func TestRegistryEnforcesTimeoutAndOutputSchema(t *testing.T) {
 		t.Fatalf("output = %+v", output)
 	}
 }
+
+type registryExecutorFunc func(context.Context, Call) Result
+
+func (fn registryExecutorFunc) Execute(ctx context.Context, call Call) Result { return fn(ctx, call) }
+
+func TestRegistryRetriesOnlyExplicitlySafeQueries(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		effect    string
+		safe      bool
+		retryable bool
+		want      int
+	}{
+		{"query retries", "query", true, true, 3},
+		{"query not opted in", "query", false, true, 1},
+		{"permanent query failure", "query", true, false, 1},
+		{"prepare never repeats", "prepare", true, true, 1},
+		{"compute never repeats", "compute", true, true, 1},
+		{"workspace never repeats", "workspace", true, true, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := testSpec()
+			spec.Effect, spec.RetryPolicy = tc.effect, map[string]any{"safe": tc.safe}
+			var calls []Call
+			executor := registryExecutorFunc(func(_ context.Context, call Call) Result {
+				calls = append(calls, call)
+				if tc.want == 3 && len(calls) == 3 {
+					return Result{Status: "ok", Data: map[string]any{"count": 1}}
+				}
+				return Result{Status: "error", Error: &ToolError{Code: "UPSTREAM_FAILED", Message: "temporary failure", Retryable: tc.retryable}}
+			})
+			registry, err := NewRegistry([]ToolSpec{spec}, executor)
+			if err != nil {
+				t.Fatal(err)
+			}
+			registry.retry = retryTiming{wait: func(context.Context, time.Duration) error { return nil }, backoff: func(int) time.Duration { return time.Millisecond }}
+			var notices []RetryNotice
+			ctx := withRetryObserver(context.Background(), func(notice RetryNotice) { notices = append(notices, notice) })
+			call := Call{SchemaVersion: callSchemaVersion, RequestID: "original-id", Tool: spec.Name, ToolVersion: spec.Version, Input: map[string]any{"query": "雄县"}}
+			result := registry.Invoke(ctx, call)
+			if len(calls) != tc.want || len(notices) != tc.want-1 {
+				t.Fatalf("calls=%d notices=%+v", len(calls), notices)
+			}
+			for _, actual := range calls {
+				if actual.RequestID != call.RequestID || actual.Input["query"] != call.Input["query"] {
+					t.Fatalf("call identity changed: %+v", actual)
+				}
+			}
+			if tc.want == 3 && (result.Status != "ok" || result.RequestID != call.RequestID || notices[0].Stage != "tool.region.search" || notices[0].Attempt != 2 || notices[1].Attempt != 3) {
+				t.Fatalf("result=%+v notices=%+v", result, notices)
+			}
+		})
+	}
+}
+
+func TestRegistryRetryUsesFreshTimeoutForEachAttempt(t *testing.T) {
+	spec := testSpec()
+	spec.RetryPolicy = map[string]any{"safe": true}
+	spec.TimeoutPolicy = map[string]any{"timeout_ms": 5}
+	var contexts []context.Context
+	registry, err := NewRegistry([]ToolSpec{spec}, registryExecutorFunc(func(ctx context.Context, _ Call) Result {
+		contexts = append(contexts, ctx)
+		if len(contexts) < 3 {
+			<-ctx.Done()
+			return Result{}
+		}
+		if ctx.Err() != nil {
+			t.Error("new attempt inherited expired context")
+		}
+		return Result{Status: "ok", Data: map[string]any{}}
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry.retry = retryTiming{wait: func(context.Context, time.Duration) error { return nil }}
+	result := registry.Invoke(context.Background(), Call{RequestID: "fresh-timeout", Tool: spec.Name, ToolVersion: spec.Version, Input: map[string]any{"query": "x"}})
+	if result.Status != "ok" || len(contexts) != 3 || contexts[0] == contexts[1] || contexts[1] == contexts[2] {
+		t.Fatalf("result=%+v contexts=%d", result, len(contexts))
+	}
+}
+
+func TestRegistryCancellationStopsBeforeRetryAndBeforeExecution(t *testing.T) {
+	spec := testSpec()
+	spec.RetryPolicy = map[string]any{"safe": true}
+	calls := 0
+	registry, err := NewRegistry([]ToolSpec{spec}, registryExecutorFunc(func(context.Context, Call) Result {
+		calls++
+		return Result{Status: "error", Error: &ToolError{Code: "UPSTREAM_FAILED", Message: "temporary failure", Retryable: true}}
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx = withRetryObserver(ctx, func(RetryNotice) { cancel() })
+	call := Call{RequestID: "cancel", Tool: spec.Name, ToolVersion: spec.Version, Input: map[string]any{"query": "x"}}
+	result := registry.Invoke(ctx, call)
+	if calls != 1 || result.Error == nil || result.Error.Code != "TOOL_CANCELLED" || result.Error.Retryable {
+		t.Fatalf("calls=%d result=%+v", calls, result)
+	}
+	result = registry.Invoke(ctx, call)
+	if calls != 1 || result.Error == nil || result.Error.Code != "TOOL_CANCELLED" {
+		t.Fatalf("cancelled context executed tool: calls=%d result=%+v", calls, result)
+	}
+}
+
+func TestRegistryRetryStopsAtThirdTransientFailure(t *testing.T) {
+	spec := testSpec()
+	spec.RetryPolicy = map[string]any{"safe": true}
+	calls := 0
+	registry, err := NewRegistry([]ToolSpec{spec}, registryExecutorFunc(func(context.Context, Call) Result {
+		calls++
+		return Result{Status: "error", Error: &ToolError{Code: "UPSTREAM_FAILED", Message: "still unavailable", Retryable: true}}
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry.retry.wait = func(context.Context, time.Duration) error { return nil }
+	result := registry.Invoke(context.Background(), Call{RequestID: "bounded", Tool: spec.Name, ToolVersion: spec.Version, Input: map[string]any{"query": "x"}})
+	if calls != 3 || result.Error == nil || result.Error.Code != "UPSTREAM_FAILED" {
+		t.Fatalf("calls=%d result=%+v", calls, result)
+	}
+}
+
+func TestRegistryDefaultQueryDeadlineDoesNotEnableUnsafeRetries(t *testing.T) {
+	spec := testSpec()
+	spec.RetryPolicy = map[string]any{"safe": false}
+	spec.TimeoutPolicy = map[string]any{"kind": "bounded"}
+	calls := 0
+	registry, err := NewRegistry([]ToolSpec{spec}, registryExecutorFunc(func(ctx context.Context, _ Call) Result {
+		calls++
+		deadline, ok := ctx.Deadline()
+		if remaining := time.Until(deadline); !ok || remaining <= 44*time.Second || remaining > 45*time.Second {
+			t.Errorf("default query deadline=%s exists=%v", remaining, ok)
+		}
+		return Result{Status: "error", Error: &ToolError{Code: "UPSTREAM_FAILED", Message: "temporary failure", Retryable: true}}
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := registry.Invoke(context.Background(), Call{RequestID: "default-timeout", Tool: spec.Name, ToolVersion: spec.Version, Input: map[string]any{"query": "x"}})
+	if calls != 1 || result.Error == nil || result.Error.Code != "UPSTREAM_FAILED" {
+		t.Fatalf("calls=%d result=%+v", calls, result)
+	}
+}

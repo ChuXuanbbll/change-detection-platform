@@ -623,7 +623,7 @@ func sanitize(v any) any {
 
 func workspaceDTO(raw map[string]any) map[string]any {
 	out := map[string]any{}
-	for _, key := range []string{"revision", "page", "region_id", "region_name", "phase_ids", "phases", "active_phase", "bounds", "aoi", "task_id", "result_id", "task"} {
+	for _, key := range []string{"revision", "page", "region_id", "region_name", "phase_ids", "phases", "active_phase", "bounds", "aoi", "task_id", "result_id", "task", "detection"} {
 		if value, ok := raw[key]; ok {
 			out[key] = value
 		}

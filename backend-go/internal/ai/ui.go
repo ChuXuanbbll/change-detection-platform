@@ -6,18 +6,22 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
 
-var uiActions = []string{"select_region", "load_phase", "load_phases", "set_existing_aoi", "fly_to_bounds", "show_task", "show_result", "open_report"}
+var uiActions = []string{"select_region", "load_phase", "load_phases", "set_existing_aoi", "fly_to_bounds", "show_task", "show_result", "open_report", "submit_detection"}
 
 func uiToolSpecs() []ToolSpec {
 	result := make([]ToolSpec, 0, len(uiActions))
 	for _, action := range uiActions {
 		result = append(result, ToolSpec{Name: "ui." + action, Version: "1.0.0", Description: "Request a typed workspace UI action and wait for its acknowledgement.", Effect: "workspace", MaxOutputSize: 16384, InputSchema: uiInputSchemaForAction(action), OutputSchema: uiOutputSchema()})
+		if action == "submit_detection" {
+			result[len(result)-1].Description = "Submit detection through the same workspace command as the Start detection button. The server binds normalized dates, AOI and parameter overrides; current workspace values are preserved otherwise. Returns a created task, not completed inference. Do not resubmit while running or after an uncertain acknowledgement."
+		}
 	}
 	return result
 }
@@ -30,6 +34,7 @@ func uiInputSchemaForAction(action string) map[string]any {
 	base := uiInputSchema()
 	properties := base["properties"].(map[string]any)
 	allowed := map[string][]string{
+		"submit_detection": {"expected_revision"},
 		"select_region":    {"region_id", "expected_revision"},
 		"load_phase":       {"phase_id", "phase_ids", "scene_ids", "expected_revision"},
 		"load_phases":      {"phase_id", "phase_ids", "scene_ids", "expected_revision"},
@@ -48,7 +53,7 @@ func uiInputSchemaForAction(action string) map[string]any {
 }
 
 func uiOutputSchema() map[string]any {
-	return map[string]any{"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object", "additionalProperties": false, "properties": map[string]any{"status": map[string]any{"type": "string", "enum": []any{"applied", "rejected", "failed", "timeout", "cancelled"}}, "action_id": map[string]any{"type": "string", "minLength": 1}, "context_revision": map[string]any{"type": "string"}, "error_code": map[string]any{"type": "string"}}, "required": []any{"status", "action_id"}}
+	return map[string]any{"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object", "additionalProperties": false, "properties": map[string]any{"status": map[string]any{"type": "string", "enum": []any{"applied", "rejected", "failed", "timeout", "cancelled"}}, "action_id": map[string]any{"type": "string", "minLength": 1}, "context_revision": map[string]any{"type": "string"}, "workspace": map[string]any{"type": "object"}, "task_id": map[string]any{"type": "string"}, "pair_count": map[string]any{"type": "integer", "minimum": 1}, "error_code": map[string]any{"type": "string"}}, "required": []any{"status", "action_id"}}
 }
 
 func uiAOISchema() map[string]any {
@@ -59,6 +64,9 @@ func uiAOISchema() map[string]any {
 }
 
 func (g *Gateway) handleUICommand(ctx context.Context, session *Session, workflow *Workflow, w io.Writer, call ProviderToolCall, args map[string]any) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	action := call.Function.Name[len("ui."):]
 	allowed := false
 	for _, candidate := range uiActions {
@@ -73,6 +81,37 @@ func (g *Gateway) handleUICommand(ctx context.Context, session *Session, workflo
 	if err := validateUIArgs(action, args); err != nil {
 		return err
 	}
+	if action == "submit_detection" {
+		if workflow.Intent == nil || workflow.OperationIndex >= len(workflow.Intent.Operations) {
+			return fmt.Errorf("detection requires a normalized operation")
+		}
+		op := workflow.Intent.Operations[workflow.OperationIndex]
+		if op.SkillID != "change.detect.v1" || stringValue(op.Slots["operation"]) != "detect" {
+			return fmt.Errorf("detection is not requested")
+		}
+		if len(dataStrings(op.Slots, "admin_path")) > 0 {
+			resolved := false
+			for _, prior := range workflow.ToolCalls {
+				if prior.OperationIndex != workflow.OperationIndex || prior.Tool != "region.search" || prior.Status != "ok" || !sameJSON(normalizeJSONValue(prior.Input["admin_path"]), normalizeJSONValue(op.Slots["admin_path"])) {
+					continue
+				}
+				for _, row := range dataRows(prior.Data, "matches") {
+					if stringValue(mapValue(row)["region_id"]) == stringValue(session.Workspace["region_id"]) {
+						resolved = true
+					}
+				}
+			}
+			if !resolved {
+				return fmt.Errorf("resolve the requested administrative path and select its region before detection")
+			}
+		}
+		args = cloneMap(args)
+		for _, key := range []string{"region_id", "phase_dates", "phase_ids", "scene_ids", "date_range", "pair_policy", "aoi", "model_id", "detection_settings"} {
+			if value, ok := op.Slots[key]; ok {
+				args[key] = value
+			}
+		}
+	}
 	actionID := uuid.NewString()
 	expected := workspaceRevision(session.Workspace)
 	if value, ok := args["expected_revision"].(string); ok {
@@ -82,7 +121,15 @@ func (g *Gateway) handleUICommand(ctx context.Context, session *Session, workflo
 	encodedArgs, _ := json.Marshal(map[string]any{"action": action, "args": args, "expected_revision": expected})
 	fingerprint := fmt.Sprintf("%x", sha256.Sum256(encodedArgs))
 	for _, existing := range session.Actions {
-		if existing.Fingerprint == fingerprint {
+		// Submission is irreversible once accepted. An uncertain or successful
+		// acknowledgement in this operation must never create another task.
+		if action == "submit_detection" && existing.WorkflowID == workflow.ID && existing.OperationIndex == workflow.OperationIndex && existing.Command.Action == action && existing.Status != "rejected" {
+			if existing.Status == "applied" {
+				return nil
+			}
+			return fmt.Errorf("detection submission already pending or unconfirmed; inspect workspace task")
+		}
+		if existing.WorkflowID == workflow.ID && existing.OperationIndex == workflow.OperationIndex && existing.Fingerprint == fingerprint {
 			if existing.Status == "applied" {
 				return nil
 			}
@@ -91,13 +138,19 @@ func (g *Gateway) handleUICommand(ctx context.Context, session *Session, workflo
 			}
 		}
 	}
-	pending := PendingAction{ID: actionID, Command: command, Status: "pending", Fingerprint: fingerprint, CreatedAt: time.Now().UTC()}
+	pending := PendingAction{OperationIndex: workflow.OperationIndex, ID: actionID, WorkflowID: workflow.ID, Command: command, Status: "pending", Fingerprint: fingerprint, CreatedAt: time.Now().UTC()}
+	g.requestMu.Lock()
+	if current, ok := g.repo.getSession(session.ID); !ok || current.ClosedAt != nil || ctx.Err() != nil {
+		g.requestMu.Unlock()
+		return context.Canceled
+	}
 	if session.Actions == nil {
 		session.Actions = make(map[string]PendingAction)
 	}
 	session.Actions[actionID] = pending
 	session.UpdatedAt = time.Now().UTC()
 	if err := g.repo.upsertSession(*session); err != nil {
+		g.requestMu.Unlock()
 		return err
 	}
 	ackCh := make(chan ActionAck, 1)
@@ -106,16 +159,26 @@ func (g *Gateway) handleUICommand(ctx context.Context, session *Session, workflo
 	g.ackMu.Unlock()
 	defer func() { g.ackMu.Lock(); delete(g.acks, actionID); g.ackMu.Unlock() }()
 	g.emitEvent(workflow, w, "ui_command", command)
-	timer := time.NewTimer(30 * time.Second)
+	g.requestMu.Unlock()
+	wait := 30 * time.Second
+	if action == "submit_detection" {
+		wait = operationPollLimit
+	}
+	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	select {
 	case ack := <-ackCh:
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		pending.Status = ack.Status
 		pending.Ack = &ack
 		now := time.Now().UTC()
 		pending.AcknowledgedAt = &now
 		session.Actions[actionID] = pending
-		session.Workspace = ack.Workspace
+		if ack.Workspace != nil {
+			session.Workspace = ack.Workspace
+		}
 		_ = g.repo.upsertSession(*session)
 		if ack.Status != "applied" {
 			return fmt.Errorf("UI action was not applied")
@@ -134,12 +197,11 @@ func (g *Gateway) handleUICommand(ctx context.Context, session *Session, workflo
 	}
 }
 
-func latestAppliedActionID(session *Session) string {
-	latest := ""
-	var latestAt time.Time
-	for id, action := range session.Actions {
-		if action.Status == "applied" && (latest == "" || action.CreatedAt.After(latestAt)) {
-			latest, latestAt = id, action.CreatedAt
+func latestOperationAction(session *Session, workflow *Workflow, action string) PendingAction {
+	latest := PendingAction{}
+	for _, candidate := range session.Actions {
+		if candidate.WorkflowID == workflow.ID && candidate.OperationIndex == workflow.OperationIndex && candidate.Command.Action == action && (latest.ID == "" || candidate.CreatedAt.After(latest.CreatedAt)) {
+			latest = candidate
 		}
 	}
 	return latest
@@ -147,6 +209,7 @@ func latestAppliedActionID(session *Session) string {
 
 func validateUIArgs(action string, args map[string]any) error {
 	allowed := map[string]map[string]bool{
+		"submit_detection": {"expected_revision": true},
 		"select_region":    {"region_id": true, "expected_revision": true},
 		"load_phase":       {"phase_id": true, "phase_ids": true, "scene_ids": true, "expected_revision": true},
 		"load_phases":      {"phase_id": true, "phase_ids": true, "scene_ids": true, "expected_revision": true},
@@ -169,6 +232,8 @@ func validateUIArgs(action string, args map[string]any) error {
 		return nil
 	}
 	switch action {
+	case "submit_detection":
+		return nil
 	case "select_region":
 		return requireString("region_id")
 	case "load_phase", "load_phases":
@@ -206,6 +271,8 @@ func validateUIArgs(action string, args map[string]any) error {
 }
 
 func (g *Gateway) actionAck(c *gin.Context) {
+	g.requestMu.Lock()
+	defer g.requestMu.Unlock()
 	var ack ActionAck
 	decoder := json.NewDecoder(io.LimitReader(c.Request.Body, 64<<10))
 	decoder.DisallowUnknownFields()
@@ -219,12 +286,24 @@ func (g *Gateway) actionAck(c *gin.Context) {
 		c.JSON(404, gin.H{"error": "session not found"})
 		return
 	}
+	if session.ClosedAt != nil {
+		c.JSON(http.StatusConflict, gin.H{"code": "AI_SESSION_CLOSED", "error": "session is closed"})
+		return
+	}
 	pending, ok := session.Actions[id]
 	if !ok {
 		c.JSON(404, gin.H{"error": "action not found"})
 		return
 	}
+	if workflow, exists := g.repo.getWorkflow(pending.WorkflowID); exists && workflow.Status == "cancelled" {
+		c.JSON(http.StatusConflict, gin.H{"error": "workflow is cancelled"})
+		return
+	}
 	if pending.Status != "pending" {
+		if pending.Ack != nil && sameJSON(normalizeJSONValue(*pending.Ack), normalizeJSONValue(ack)) {
+			c.JSON(http.StatusOK, pending.Ack)
+			return
+		}
 		c.JSON(409, gin.H{"error": "action already acknowledged"})
 		return
 	}
@@ -234,6 +313,10 @@ func (g *Gateway) actionAck(c *gin.Context) {
 	}
 	if ack.Status != "applied" && ack.Status != "rejected" && ack.Status != "failed" {
 		c.JSON(400, gin.H{"error": "status must be applied, rejected, or failed"})
+		return
+	}
+	if pending.Command.Action == "submit_detection" && ack.Status == "applied" && (ack.Result == nil || ack.Result.TaskID == "" || ack.Result.PairCount < 1 || stringValue(ack.Workspace["task_id"]) != ack.Result.TaskID) {
+		c.JSON(400, gin.H{"error": "detection acknowledgement requires the created workspace task"})
 		return
 	}
 	pending.Status = ack.Status

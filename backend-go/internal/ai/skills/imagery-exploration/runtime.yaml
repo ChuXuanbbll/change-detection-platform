@@ -1,0 +1,152 @@
+id: imagery.explore.v1
+version: 2.0.0
+max_steps: 12
+input_schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  additionalProperties: false
+  properties:
+    operation:
+      type: string
+      enum:
+      - query
+      - locate
+      - models
+      - images
+      - phase
+    admin_path:
+      type: array
+      minItems: 1
+      maxItems: 8
+      items:
+        type: string
+        minLength: 1
+        maxLength: 128
+    region_id:
+      type: string
+      minLength: 1
+      maxLength: 128
+    phase_id:
+      type: string
+      minLength: 1
+      maxLength: 128
+    phase_ids:
+      type: array
+      minItems: 1
+      maxItems: 128
+      items:
+        type: string
+        minLength: 1
+        maxLength: 128
+    scene_ids:
+      type: array
+      minItems: 1
+      maxItems: 128
+      items:
+        type: string
+        minLength: 1
+        maxLength: 128
+    date_range:
+      type: object
+      additionalProperties: false
+      properties:
+        start:
+          type: string
+          minLength: 4
+          maxLength: 32
+        end:
+          type: string
+          minLength: 4
+          maxLength: 32
+        precision:
+          type: string
+          enum:
+          - day
+          - month
+          - year
+    use_workspace_context:
+      type: boolean
+    use_previous_result:
+      type: boolean
+output_schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  additionalProperties: false
+  properties:
+    status:
+      type: string
+      enum:
+      - ok
+      - needs_clarification
+    region_id:
+      type: string
+    bounds:
+      type: array
+      minItems: 4
+      maxItems: 4
+      items:
+        type: number
+    phase_ids:
+      type: array
+      maxItems: 128
+      items:
+        type: string
+    scene_ids:
+      type: array
+      maxItems: 128
+      items:
+        type: string
+    count:
+      type: integer
+      minimum: 0
+      maximum: 10000
+allowed_tools:
+- workspace.context
+- region.search
+- imagery.catalog
+- imagery.scenes
+- imagery.phase
+- image.list
+- model.list
+- ui.select_region
+- ui.load_phases
+- ui.fly_to_bounds
+steps:
+- id: context
+  tool: workspace.context
+- id: catalog
+  tool: imagery.catalog
+  requires:
+  - context
+- id: region
+  tool: region.search
+  requires:
+  - context
+- id: scenes
+  tool: imagery.scenes
+  requires:
+  - context
+- id: phase
+  tool: imagery.phase
+  requires:
+  - scenes
+- id: images
+  tool: image.list
+  requires:
+  - context
+- id: models
+  tool: model.list
+  requires:
+  - context
+- id: select_region
+  tool: ui.select_region
+  requires:
+  - region
+- id: load_phases
+  tool: ui.load_phases
+  requires:
+  - scenes
+- id: fly_to_bounds
+  tool: ui.fly_to_bounds
+  requires:
+  - region

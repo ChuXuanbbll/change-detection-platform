@@ -343,6 +343,21 @@ test('duplicate submissions are blocked throughout retrieval and sequence', asyn
   assert.equal(fetches, 1);
 });
 
+test('a replaced AI session cannot create a task after image preparation completes', async () => {
+  let release, current = true, created = 0;
+  const harness = detection({
+    fetchLocalImagery: () => new Promise(resolve => { release = resolve; }),
+    createTask: async () => { created++; return { id: 'unexpected', status: 'pending' }; },
+  });
+  const pending = harness.state.submitTask(parameters, area, undefined, () => current);
+  current = false;
+  release({ items: fourImages(), count: 4 });
+  await pending;
+  assert.equal(created, 0);
+  assert.equal(harness.state.inProgress.value, false);
+  assert.equal(harness.state.currentTaskId.value, '');
+});
+
 test('no selected area or unavailable model produces no retrieval', async () => {
   let fetches = 0;
   const { state } = detection({ fetchLocalImagery: () => { fetches++; } });

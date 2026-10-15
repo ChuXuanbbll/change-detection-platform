@@ -167,16 +167,17 @@ const RESULT_FILE: Record<ResultFormat, string> = {
   csv: 'stats.csv'
 };
 
-export function getTaskResult(taskId: string): Promise<TaskResult> {
-  return http.get<TaskResult>(`/tasks/${taskId}/result`).then((r) => r.data);
+export function getTaskResult(taskId: string, signal?: AbortSignal): Promise<TaskResult> {
+  return http.get<TaskResult>(`/tasks/${taskId}/result`, { signal }).then((r) => r.data);
 }
 
 export function downloadTaskResult(
   taskId: string,
-  format: ResultFormat
+  format: ResultFormat,
+  signal?: AbortSignal
 ): Promise<Blob> {
   return http
-    .get<Blob>(`/tasks/${taskId}/result/${RESULT_FILE[format]}`, { responseType: 'blob' })
+    .get<Blob>(`/tasks/${taskId}/result/${RESULT_FILE[format]}`, { responseType: 'blob', signal })
     .then((r) => r.data);
 }
 
@@ -212,12 +213,14 @@ export interface MaskOverlayResult {
 export async function getMaskOverlay(
   maskPath: string,
   alpha = 0.45,
-  color = '#ff0000'
+  color = '#ff0000',
+  signal?: AbortSignal
 ): Promise<MaskOverlayResult> {
   const resp = await fetch('/py/overlay/mask', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ mask_path: maskPath, alpha, color })
+    body: JSON.stringify({ mask_path: maskPath, alpha, color }),
+    signal
   });
   if (!resp.ok) {
     const text = await resp.text().catch(() => '');

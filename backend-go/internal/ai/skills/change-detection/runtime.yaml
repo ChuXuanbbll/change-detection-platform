@@ -1,0 +1,168 @@
+id: change.detect.v1
+version: 2.0.0
+max_steps: 10
+input_schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  additionalProperties: false
+  properties:
+    operation:
+      type: string
+      enum:
+      - detect
+    admin_path:
+      type: array
+      minItems: 1
+      maxItems: 8
+      items:
+        type: string
+        minLength: 1
+        maxLength: 128
+    region_id:
+      type: string
+      minLength: 1
+      maxLength: 128
+    date_range:
+      type: object
+      additionalProperties: false
+      properties:
+        start:
+          type: string
+          minLength: 4
+          maxLength: 32
+        end:
+          type: string
+          minLength: 4
+          maxLength: 32
+        precision:
+          type: string
+          enum:
+          - day
+          - month
+          - year
+      required:
+      - start
+      - end
+      - precision
+    pair_policy:
+      type: string
+      enum:
+      - first_last
+      - adjacent
+      - specified
+    aoi:
+      type: object
+      additionalProperties: false
+      properties:
+        type:
+          type: string
+          enum:
+          - Polygon
+        coordinates:
+          type: array
+          minItems: 1
+          maxItems: 1
+          items:
+            type: array
+            minItems: 4
+            maxItems: 10001
+            items:
+              type: array
+              minItems: 2
+              maxItems: 2
+              items:
+                type: number
+      required:
+      - type
+      - coordinates
+    model_id:
+      type: string
+      minLength: 1
+      maxLength: 128
+    phase_ids:
+      type: array
+      minItems: 2
+      maxItems: 128
+      items:
+        type: string
+        minLength: 1
+        maxLength: 128
+    scene_ids:
+      type: array
+      minItems: 2
+      maxItems: 128
+      items:
+        type: string
+        minLength: 1
+        maxLength: 128
+    use_workspace_context:
+      type: boolean
+    use_previous_result:
+      type: boolean
+    phase_dates:
+      type: array
+      minItems: 2
+      maxItems: 128
+      items:
+        type: string
+        pattern: ^\d{4}-\d{2}(-\d{2})?$
+    detection_settings:
+      type: object
+      additionalProperties: false
+      properties:
+        threshold:
+          type: number
+          minimum: 0
+          maximum: 1
+        resolution:
+          type: number
+          minimum: 0.000001
+        kernel_size:
+          type: integer
+          minimum: 1
+          maximum: 99
+        min_area_pixels:
+          type: integer
+          minimum: 0
+output_schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  additionalProperties: false
+  properties:
+    task_id:
+      type: string
+    pair_count:
+      type: integer
+      minimum: 1
+    status:
+      type: string
+allowed_tools:
+- workspace.context
+- region.search
+- imagery.scenes
+- model.list
+- ui.select_region
+- ui.submit_detection
+steps:
+- id: context
+  tool: workspace.context
+- id: region_search
+  tool: region.search
+  requires:
+  - context
+- id: imagery_scenes
+  tool: imagery.scenes
+  requires:
+  - context
+- id: model_list
+  tool: model.list
+  requires:
+  - context
+- id: ui_select_region
+  tool: ui.select_region
+  requires:
+  - region_search
+- id: ui_submit_detection
+  tool: ui.submit_detection
+  requires:
+  - context

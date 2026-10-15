@@ -1,6 +1,5 @@
 import {
   computed,
-  nextTick,
   onMounted,
   onUnmounted,
   ref,
@@ -9,26 +8,24 @@ import {
   type Ref,
 } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { useWorkspace } from './useWorkspace';
+import { useWorkspace, type DetectionRequest } from './useWorkspace';
 import {
   acknowledgeAiAction,
+  AiStreamError,
   asEventRecord,
+  closeAiSession,
   createAiSession,
   getAiImage,
-  getAiSession,
   getAiTask,
-  getAiWorkflow,
-  getAiWorkflowEvents,
   streamAiMessage,
   streamAiWorkflowEvents,
   type AiActionAck,
   type AiServerEvent,
-  type AiSessionSnapshot,
-  type AiWorkflowEvent,
   type AiUiCommand,
   type AiWorkspaceContext,
   isAiUiCommand,
   makeAiToolError,
+  waitForAiRetry,
 } from '../utils/ai';
 import { getAiMapAdapter } from './useWorkspace';
 import { getRegionData, type RegionCollection } from '../utils/regions';
@@ -52,32 +49,54 @@ export interface AiTimelineEntry {
   text: string;
   timestamp: number;
   detail?: unknown;
+  turnId?: string;
+  phase?: 'process' | 'final';
+}
+
+export type AiTurnStatus = 'running' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted';
+
+export interface AiConversationTurn {
+  id: string;
+  workflowId?: string;
+  requestId?: string;
+  status: AiTurnStatus;
+  entries: AiTimelineEntry[];
+  result: string;
+  error: string;
+  cursor?: string;
+  canReconnect: boolean;
 }
 
 export interface AiAssistant {
   configured: Ref<boolean>;
   open: Ref<boolean>;
   input: Ref<string>;
-  sending: Ref<boolean>;
+  sending: ComputedRef<boolean>;
+  closingSession: Ref<boolean>;
   error: Ref<string>;
   messages: Ref<AiTimelineEntry[]>;
+  turns: Ref<AiConversationTurn[]>;
   workspace: ComputedRef<AiWorkspaceContext>;
   toggle: () => void;
   close: () => void;
   send: () => Promise<void>;
+  newConversation: () => Promise<void>;
+  reconnect: (turnId: string) => Promise<void>;
   handleUiCommand: (command: AiUiCommand) => Promise<void>;
 }
 
-interface StoredMessage {
-  role?: unknown;
-  type?: unknown;
-  kind?: unknown;
-  text?: unknown;
-  content?: unknown;
-  message?: unknown;
-  detail?: unknown;
-  timestamp?: unknown;
+interface SessionOperation {
+  generation: number;
+  signal: AbortSignal;
 }
+
+type TurnConnection =
+  | {
+      kind: 'message';
+      sessionId: string;
+      body: { text: string; request_id: string; workspace: AiWorkspaceContext };
+    }
+  | { kind: 'workflow'; workflowId: string };
 
 interface AiStatusPayload {
   configured?: unknown;
@@ -100,6 +119,9 @@ function actionText(value: unknown, fallback: string): string {
     const message =
       stringValue(value.message) || stringValue(value.detail) || stringValue(value.name);
     if (message) return message;
+    const tool = stringValue(value.tool);
+    if (tool)
+      return `${tool} · ${value.status === 'pending' ? '已提交，处理中' : value.status === 'error' ? '调用失败' : fallback}`;
   }
   return fallback;
 }
@@ -150,64 +172,6 @@ function taskStatus(value: string): TimelinePair['status'] {
   return 'waiting';
 }
 
-function sessionIdFromStorage(): string | undefined {
-  try {
-    const value = sessionStorage.getItem(SESSION_STORAGE_KEY);
-    return value && value.length ? value : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function storeSessionId(value: string): void {
-  try {
-    sessionStorage.setItem(SESSION_STORAGE_KEY, value);
-  } catch {
-    /* private browsing */
-  }
-}
-
-function initialRevision(): string {
-  try {
-    return sessionStorage.getItem(CONTEXT_REVISION_KEY) || 'workspace-0';
-  } catch {
-    return 'workspace-0';
-  }
-}
-
-function storeRevision(value: string): void {
-  try {
-    sessionStorage.setItem(CONTEXT_REVISION_KEY, value);
-  } catch {
-    /* private browsing */
-  }
-}
-
-function parseStoredMessage(value: unknown, index: number): AiTimelineEntry | undefined {
-  if (!isRecord(value)) return undefined;
-  const source = value as StoredMessage;
-  const text =
-    stringValue(source.text) || stringValue(source.content) || stringValue(source.message);
-  if (!text) return undefined;
-  const role = stringValue(source.role);
-  const kind = stringValue(source.kind) || stringValue(source.type);
-  const entryKind: AiEntryKind =
-    role === 'user'
-      ? 'user'
-      : kind === 'error'
-        ? 'error'
-        : role === 'assistant'
-          ? 'assistant'
-          : 'system';
-  return {
-    id: `restored-${index}`,
-    kind: entryKind,
-    text,
-    detail: source.detail,
-    timestamp: typeof source.timestamp === 'number' ? source.timestamp : Date.now() - index * 1000,
-  };
-}
-
 async function aiConfigured(): Promise<boolean> {
   const response = await fetch('/api/ai/status', { headers: { Accept: 'application/json' } });
   if (!response.ok) throw new Error(`AI status request failed (${response.status})`);
@@ -229,22 +193,40 @@ export function useAiAssistant(): AiAssistant {
   const configured = ref(false);
   const open = ref(false);
   const input = ref('');
-  const sending = ref(false);
   const error = ref('');
   const messages = ref<AiTimelineEntry[]>([]);
+  const turns = ref<AiConversationTurn[]>([]);
+  const closingSession = ref(false);
+  const sending = computed(
+    () => turns.value.some((turn) => turn.status === 'running'),
+  );
   const sessionId = ref<string>();
-  const contextRevision = ref(initialRevision());
-  let activeStream: AbortController | null = null;
-  const workflowStreams = new Set<AbortController>();
+  // Reload starts a new workspace. Remove keys left by older versions, but keep
+  // sessions and reconnect cursors in memory for SPA navigation only.
+  try {
+    sessionStorage.removeItem(SESSION_STORAGE_KEY);
+    sessionStorage.removeItem(CONTEXT_REVISION_KEY);
+  } catch {
+    /* private browsing */
+  }
+  const contextRevision = ref(newId('workspace'));
+  let generation = 0;
+  let disposed = false;
+  let sessionController = new AbortController();
+  const connections = new Map<string, TurnConnection>();
+  const connectedTurns = new Set<string>();
+  const seenEvents = new Set<string>();
   const handledActionIds = new Set<string>();
   const acknowledgedActionIds = new Set<string>();
-  const pendingAcks = new Map<string, { ack: AiActionAck; command: AiUiCommand }>();
+  const pendingAcks = new Map<
+    string,
+    { ack: AiActionAck; command: AiUiCommand; sessionId: string; turnId?: string }
+  >();
+  const inFlightCommands = new Map<string, { command: AiUiCommand; turnId?: string }>();
   const ackInFlight = new Set<string>();
   const ackRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  let restoringWorkspace = false;
   let lastConfigCheck = 0;
   let configCheck: Promise<void> | null = null;
-  let restored = false;
 
   const workspace = computed<AiWorkspaceContext>(() => {
     const selected = workspaceStore.selectedRegion.value;
@@ -265,6 +247,7 @@ export function useAiAssistant(): AiAssistant {
       bounds: area ? [area.west, area.south, area.east, area.north] : undefined,
       aoi: workspaceStore.selectedGeometry.value || undefined,
       task_id: workspaceStore.currentTaskId.value || undefined,
+      detection: workspaceStore.getDetectionSelection() ? { model_id: workspaceStore.selectedModel.value, config_revision: workspaceStore.getDetectionSelection()!.config_revision, settings: { ...workspaceStore.detectionSettings } } : undefined,
       task: task
         ? {
             status: task.status,
@@ -276,9 +259,8 @@ export function useAiAssistant(): AiAssistant {
   });
 
   function bumpRevision(): string {
-    const next = `${contextRevision.value.split('-')[0]}-${Date.now().toString(36)}`;
+    const next = newId('workspace');
     contextRevision.value = next;
-    storeRevision(next);
     return next;
   }
 
@@ -291,44 +273,58 @@ export function useAiAssistant(): AiAssistant {
       aoi: workspace.value.aoi,
       task_id: workspace.value.task_id,
       active_phase: workspace.value.active_phase,
+      detection: workspace.value.detection,
     }),
   );
   watch(workspaceFingerprint, (next, previous) => {
-    if (!restoringWorkspace && previous !== undefined && next !== previous) bumpRevision();
-  });
+    if (previous !== undefined && next !== previous) bumpRevision();
+  }, { flush: 'sync' });
 
-  function append(kind: AiEntryKind, text: string, detail?: unknown): AiTimelineEntry {
-    const entry: AiTimelineEntry = { id: newId('ai'), kind, text, detail, timestamp: Date.now() };
+  function operation(): SessionOperation {
+    return { generation, signal: sessionController.signal };
+  }
+
+  function isCurrent(op: SessionOperation): boolean {
+    return !disposed && op.generation === generation && !op.signal.aborted;
+  }
+
+  function requireCurrent(op: SessionOperation): void {
+    if (!isCurrent(op)) throw new DOMException('Session changed', 'AbortError');
+  }
+
+  function createTurn(workflowId?: string, requestId?: string): AiConversationTurn {
+    turns.value.push({
+      id: newId('turn'),
+      workflowId,
+      requestId,
+      status: 'running',
+      entries: [],
+      result: '',
+      error: '',
+      canReconnect: false,
+    });
+    return turns.value[turns.value.length - 1];
+  }
+
+  function append(
+    kind: AiEntryKind,
+    text: string,
+    detail?: unknown,
+    target?: AiConversationTurn,
+  ): AiTimelineEntry {
+    const turn = target || turns.value[turns.value.length - 1] || createTurn();
+    const entry: AiTimelineEntry = {
+      id: newId('ai'),
+      kind,
+      text,
+      detail,
+      timestamp: Date.now(),
+      turnId: turn.id,
+      phase: 'process',
+    };
     messages.value.push(entry);
-    return entry;
-  }
-
-  function updateRevisionFromSnapshot(snapshot: AiSessionSnapshot): void {
-    const revision = snapshot.workspace?.revision;
-    if (typeof revision === 'string' && revision) {
-      contextRevision.value = revision;
-      storeRevision(revision);
-    }
-  }
-
-  function workspaceHasContext(): boolean {
-    return Boolean(
-      workspaceStore.selectedRegion.value ||
-        workspaceStore.selectedArea.value ||
-        workspaceStore.selectedGeometry.value ||
-        workspaceStore.loadedPhaseIds.value.length ||
-        workspaceStore.currentTaskId.value,
-    );
-  }
-
-  function snapshotPhaseIds(snapshot: AiWorkspaceContext): string[] {
-    if (Array.isArray(snapshot.phase_ids) && snapshot.phase_ids.length)
-      return snapshot.phase_ids.filter((id) => typeof id === 'string');
-    return Array.isArray(snapshot.phases)
-      ? snapshot.phases
-          .filter((phase) => phase && typeof phase.id === 'string')
-          .map((phase) => phase.id)
-      : [];
+    turn.entries.push(entry);
+    return turn.entries[turn.entries.length - 1];
   }
 
   async function refreshConfigured(force = false): Promise<void> {
@@ -338,10 +334,10 @@ export function useAiAssistant(): AiAssistant {
     lastConfigCheck = now;
     configCheck = aiConfigured()
       .then((value) => {
-        configured.value = value;
+        if (!disposed) configured.value = value;
       })
       .catch(() => {
-        configured.value = false;
+        if (!disposed) configured.value = false;
         // A transient status failure should be recoverable on the next window
         // focus without forcing a full page reload. A successful `configured: false`
         // response remains throttled by the normal interval above.
@@ -353,256 +349,68 @@ export function useAiAssistant(): AiAssistant {
     await configCheck;
   }
 
-  async function restoreStoredSession(): Promise<void> {
-    if (!configured.value || restored) return;
-    restored = true;
-    const previous = sessionIdFromStorage();
-    if (!previous) return;
-    try {
-      await restoreSession(previous);
-    } catch {
-      try {
-        sessionStorage.removeItem(SESSION_STORAGE_KEY);
-      } catch {
-        /* private browsing */
-      }
-    }
-  }
-
-  async function restoreWorkspace(snapshot: AiSessionSnapshot): Promise<void> {
-    const target = snapshot.workspace;
-    if (!target || workspaceHasContext()) return;
-    restoringWorkspace = true;
-    const initialFingerprint = workspaceFingerprint.value;
-    try {
-      if (target.region_id) {
-        const collection = await getRegionData<RegionCollection>('/py/local/regions');
-        // A user can create an AOI or select a region while the directory request
-        // is in flight. Preserve that newer context instead of applying the old
-        // session snapshot over it.
-        if (workspaceFingerprint.value !== initialFingerprint || workspaceHasContext()) return;
-        const feature = collection.features.find(
-          (item) => item.id === target.region_id || item.properties.region_id === target.region_id,
-        );
-        if (!feature) {
-          append('error', '会话中的行政区已不在当前目录中');
-          return;
-        }
-        await workspaceStore.selectWorkspaceRegion(feature);
-        if (workspaceStore.selectedRegion.value?.id !== feature.id) return;
-        // The catalog request yields to user input. An AOI created in the
-        // meantime belongs to the current workspace and must not be replaced.
-        if (workspaceStore.selectedArea.value || workspaceStore.selectedGeometry.value) return;
-        const catalogPhaseIds = workspaceStore.imageryPhases.value.map((phase) => phase.id);
-        if (
-          workspaceStore.loadedPhaseIds.value.some((id) => !catalogPhaseIds.includes(id)) ||
-          workspaceStore.loadedPhaseIds.value.length !== catalogPhaseIds.length ||
-          (catalogPhaseIds.length > 0 &&
-            workspaceStore.activeMonth.value !== workspaceStore.imageryPhases.value[0]?.month)
-        )
-          return;
-      }
-
-      const phaseIds = snapshotPhaseIds(target);
-      for (const id of workspaceStore.loadedPhaseIds.value.slice()) {
-        if (!phaseIds.includes(id)) workspaceStore.removePhase(id);
-      }
-      for (const id of phaseIds) {
-        if (workspaceStore.catalogPhases.value.some((phase) => phase.id === id && phase.available))
-          workspaceStore.addPhase(id);
-      }
-
-      const bounds = parseBounds(target.bounds);
-      const aoi = parsePolygon(target.aoi);
-      if (bounds && aoi) {
-        const regionGeometry = workspaceStore.selectedRegion.value?.geometry;
-        if (
-          !regionGeometry ||
-          !polygonError(aoi.coordinates[0].slice(0, -1) as [number, number][], regionGeometry)
-        )
-          workspaceStore.setSelectedArea(
-            { west: bounds[0], south: bounds[1], east: bounds[2], north: bounds[3] },
-            aoi,
-          );
-      }
-      if (
-        typeof target.active_phase === 'string' &&
-        workspaceStore.imageryPhases.value.some((phase) => phase.month === target.active_phase)
-      ) {
-        workspaceStore.activeMonth.value = target.active_phase;
-      }
-      // Keep the snapshot revision stable while the watcher observes the restored refs.
-      await nextTick();
-    } finally {
-      await nextTick();
-      restoringWorkspace = false;
-    }
-  }
-
-  async function restoreSession(id: string): Promise<void> {
-    const snapshot = await getAiSession(id);
-    sessionId.value = snapshot.id;
-    storeSessionId(snapshot.id);
-    updateRevisionFromSnapshot(snapshot);
-    await restoreWorkspace(snapshot);
-    if (Array.isArray(snapshot.messages)) {
-      messages.value = snapshot.messages
-        .map(parseStoredMessage)
-        .filter((item): item is AiTimelineEntry => !!item);
-    }
-    const actionStates = new Map<string, { status: string; command?: AiUiCommand }>();
-    const storedActions = Array.isArray(snapshot.actions)
-      ? snapshot.actions
-      : isRecord(snapshot.actions)
-        ? Object.entries(snapshot.actions).map(([id, action]) => ({ id, action }))
-        : [];
-    for (const stored of storedActions) {
-      const wrapped = isRecord(stored) && isRecord(stored.action) ? stored : undefined;
-      const action = wrapped ? wrapped.action : stored;
-      if (!isRecord(action)) continue;
-      const actionId = stringValue(action.id) || (wrapped ? stringValue(wrapped.id) : undefined);
-      const status = stringValue(action.status)?.toLowerCase();
-      if (!actionId || !status) continue;
-      actionStates.set(actionId, {
-        status,
-        command: isAiUiCommand(action.command) ? action.command : undefined,
-      });
-      // Seed durable terminal states before subscribing: the matching event
-      // might be missing from the fetched history but arrive on the live stream.
-      if (status !== 'pending') {
-        handledActionIds.add(actionId);
-        const name = isAiUiCommand(action.command) ? action.command.action : actionId;
-        if (status === 'applied') append('system', `已恢复界面操作：${name}`);
-        else if (status === 'rejected') append('error', `恢复的界面操作已被拒绝：${name}`);
-        else append('system', `已恢复界面操作终态（${status}），未重复执行：${name}`);
-      }
-    }
-    for (const workflowId of snapshot.workflow_ids || []) {
-      try {
-        const workflow = await getAiWorkflow(workflowId);
-        const events = await getAiWorkflowEvents(workflowId);
-        await replayWorkflowEvents(events, actionStates);
-        if (workflow.status === 'running' || workflow.status === 'queued') {
-          const controller = new AbortController();
-          workflowStreams.add(controller);
-          const after = events.reduce((max, event) => Math.max(max, event.id || 0), 0);
-          void streamAiWorkflowEvents(
-            workflowId,
-            after,
-            (event) => {
-              onStreamEvent(event);
-            },
-            controller.signal,
-          )
-            .catch((cause: unknown) => {
-              if (!controller.signal.aborted)
-                append('error', cause instanceof Error ? cause.message : '工作流订阅失败');
-            })
-            .finally(() => workflowStreams.delete(controller));
-        }
-      } catch (cause: unknown) {
-        append('error', cause instanceof Error ? cause.message : '工作流恢复失败');
-      }
-    }
-    // A pending action may have been persisted before its workflow event. Recover
-    // it from the durable session snapshot after replaying all known events.
-    for (const [actionId, action] of actionStates) {
-      if (action.status !== 'pending' || !action.command || handledActionIds.has(actionId))
-        continue;
-      await handleUiCommand(action.command);
-    }
-  }
-
-  async function replayWorkflowEvents(
-    events: AiWorkflowEvent[],
-    actionStates: Map<string, { status: string; command?: AiUiCommand }>,
-  ): Promise<void> {
-    for (const event of events) {
-      if (event.type === 'message' || event.type === 'text_delta') continue;
-      const payload = event.data;
-      if (event.type === 'ui_command') {
-        const command = isAiUiCommand(payload) ? payload : undefined;
-        if (!command) {
-          append('error', '恢复的界面操作格式无效', payload);
-          continue;
-        }
-        const state = actionStates.get(command.action_id);
-        if (handledActionIds.has(command.action_id)) continue;
-        if (state?.status === 'applied') {
-          handledActionIds.add(command.action_id);
-          append('system', `已恢复界面操作：${command.action}`);
-        } else if (state?.status === 'rejected') {
-          handledActionIds.add(command.action_id);
-          append('error', `恢复的界面操作已被拒绝：${command.action}`);
-        } else if (state?.status === 'pending') {
-          await handleUiCommand(state.command || command);
-        } else if (
-          state?.status === 'failed' ||
-          state?.status === 'timeout' ||
-          state?.status === 'cancelled'
-        ) {
-          handledActionIds.add(command.action_id);
-          append('system', `已恢复界面操作终态（${state.status}），未重复执行：${command.action}`);
-        } else {
-          handledActionIds.add(command.action_id);
-          append('progress', '界面操作状态未知，未自动重复执行', payload);
-        }
-        continue;
-      }
-      onStreamEvent({
-        type: event.type,
-        data: payload,
-        id: event.id == null ? undefined : String(event.id),
-      });
-    }
-  }
-
-  async function ensureSession(): Promise<string> {
+  async function ensureSession(op: SessionOperation): Promise<string> {
+    requireCurrent(op);
     if (sessionId.value) return sessionId.value;
-    const created = await createAiSession();
+    const created = await createAiSession(op.signal);
+    requireCurrent(op);
     sessionId.value = created.id;
-    storeSessionId(created.id);
     return created.id;
   }
 
   async function acknowledgeWithRetry(
     command: AiUiCommand,
     acknowledgement: AiActionAck,
+    op: SessionOperation,
+    id: string,
+    turn?: AiConversationTurn,
   ): Promise<void> {
+    if (!isCurrent(op)) return;
     const actionId = command.action_id;
     if (acknowledgedActionIds.has(actionId) || ackInFlight.has(actionId)) return;
     ackInFlight.add(actionId);
-    pendingAcks.set(actionId, { command, ack: acknowledgement });
+    pendingAcks.set(actionId, { command, ack: acknowledgement, sessionId: id, turnId: turn?.id });
     try {
-      const id = sessionId.value;
-      if (!id) return;
       let lastError: unknown;
       for (let attempt = 0; attempt <= AI_ACK_RETRY_DELAYS_MS.length; attempt += 1) {
+        requireCurrent(op);
         if (attempt > 0) {
-          await new Promise((resolve) => setTimeout(resolve, AI_ACK_RETRY_DELAYS_MS[attempt - 1]));
+          await waitForAiRetry(AI_ACK_RETRY_DELAYS_MS[attempt - 1], op.signal);
         }
         try {
-          await acknowledgeAiAction(id, actionId, acknowledgement);
+          await acknowledgeAiAction(id, actionId, acknowledgement, op.signal);
+          requireCurrent(op);
           acknowledgedActionIds.add(actionId);
           pendingAcks.delete(actionId);
           return;
         } catch (cause: unknown) {
+          if (!isCurrent(op)) return;
           lastError = cause;
         }
       }
       if (!ackRetryTimers.has(actionId)) {
         const timer = setTimeout(() => {
           ackRetryTimers.delete(actionId);
-          void acknowledgeWithRetry(command, acknowledgement);
+          if (isCurrent(op)) void acknowledgeWithRetry(command, acknowledgement, op, id, turn);
         }, 5_000);
         ackRetryTimers.set(actionId, timer);
       }
       append(
         'error',
         lastError instanceof Error ? lastError.message : '界面操作回执失败，正在重试',
+        undefined,
+        turn,
       );
+    } catch (cause: unknown) {
+      if (isCurrent(op))
+        append(
+          'error',
+          cause instanceof Error ? cause.message : '界面操作回执失败',
+          undefined,
+          turn,
+        );
     } finally {
-      ackInFlight.delete(actionId);
+      if (isCurrent(op)) ackInFlight.delete(actionId);
     }
   }
 
@@ -613,86 +421,262 @@ export function useAiAssistant(): AiAssistant {
     open.value = !open.value;
   }
 
-  function eventData(event: AiServerEvent): unknown {
-    const record = asEventRecord(event.data);
-    return record && record.data !== undefined ? record.data : event.data;
+  function finishTurn(turn: AiConversationTurn, text: string): void {
+    turn.result = text;
+    turn.status = 'succeeded';
+    turn.error = '';
+    turn.canReconnect = false;
+    const lastAssistant = [...turn.entries].reverse().find((entry) => entry.kind === 'assistant');
+    if (lastAssistant?.text === text) lastAssistant.phase = 'final';
+    const existing = turn.entries.find((entry) => entry.kind === 'final');
+    if (existing) existing.text = text;
+    else append('final', text, undefined, turn).phase = 'final';
   }
 
-  function onStreamEvent(event: AiServerEvent): void {
-    const payload = eventData(event);
+  function onStreamEvent(
+    event: AiServerEvent,
+    turn: AiConversationTurn,
+    op: SessionOperation,
+  ): void {
+    if (!isCurrent(op)) return;
+    const payload = event.data;
     const record = asEventRecord(payload);
+    if (event.type === 'workflow_started') {
+      if (record?.session_id && record.session_id !== sessionId.value) return;
+      if (record?.request_id && turn.requestId && record.request_id !== turn.requestId) return;
+      if (typeof record?.workflow_id === 'string') turn.workflowId = record.workflow_id;
+      if (typeof record?.request_id === 'string') turn.requestId = record.request_id;
+    }
+    if (event.id) {
+      const key = `${turn.workflowId || turn.id}:${event.id}`;
+      if (seenEvents.has(key)) return;
+      seenEvents.add(key);
+      if (!Number.isFinite(Number(event.id)) || Number(event.id) >= Number(turn.cursor || 0))
+        turn.cursor = event.id;
+    }
     switch (event.type) {
+      case 'workflow_started':
+      case 'message':
+        return;
       case 'text_delta': {
         const text = record ? stringValue(record.text) : stringValue(payload);
         if (!text) return;
-        const current = messages.value[messages.value.length - 1];
+        const current = turn.entries[turn.entries.length - 1];
         if (current?.kind === 'assistant' && current.detail === 'streaming') current.text += text;
         else {
-          const entry = append('assistant', text);
+          const entry = append('assistant', text, undefined, turn);
           entry.detail = 'streaming';
         }
         return;
       }
       case 'plan':
-        append('plan', actionText(payload, '已生成执行计划'), payload);
+        append('plan', actionText(payload, '已生成执行计划'), payload, turn);
         return;
       case 'tool_started':
-        append('tool', actionText(payload, '正在调用工具…'), payload);
+        append('tool', actionText(payload, '正在调用工具…'), payload, turn);
         return;
       case 'tool_finished':
-        append('tool', actionText(payload, '工具调用完成'), payload);
+        append('tool', actionText(payload, '工具调用完成'), payload, turn);
         return;
       case 'tool_progress':
-        append('progress', actionText(payload, '正在处理…'), payload);
+        append(
+          'progress',
+          typeof record?.attempt === 'number' && typeof record.max_attempts === 'number'
+            ? `正在重试（${record.attempt}/${record.max_attempts}），${Number(record.delay_ms || 0) / 1000} 秒后继续`
+            : actionText(payload, '正在处理…'),
+          payload,
+          turn,
+        );
         return;
       case 'ui_command':
-        if (isAiUiCommand(payload)) void handleUiCommand(payload);
-        else append('error', '收到格式无效的界面操作指令');
+        if (isAiUiCommand(payload)) void handleUiCommand(payload, op, turn);
+        else append('error', '收到格式无效的界面操作指令', undefined, turn);
         return;
       case 'final':
-        append('final', actionText(payload, '处理完成'), payload);
-        sending.value = false;
+        finishTurn(
+          turn,
+          stringValue(record?.message) ||
+            [...turn.entries].reverse().find((entry) => entry.kind === 'assistant')?.text ||
+            turn.result ||
+            '处理完成',
+        );
+        return;
+      case 'cancelled':
+        turn.status = 'cancelled';
+        turn.result = actionText(payload, '任务已取消');
+        turn.error = '';
+        turn.canReconnect = false;
         return;
       case 'error': {
         const message = record?.message || record?.error || 'AI 请求失败';
-        error.value = typeof message === 'string' ? message : 'AI 请求失败';
-        append('error', error.value, payload);
-        sending.value = false;
+        turn.error = typeof message === 'string' ? message : 'AI 请求失败';
+        turn.status = 'failed';
+        turn.canReconnect = false;
+        append('error', turn.error, payload, turn);
         return;
       }
       default:
-        if (typeof payload === 'string' && payload) append('system', payload);
+        if (typeof payload === 'string' && payload) append('system', payload, undefined, turn);
+    }
+  }
+
+  async function connectTurn(turn: AiConversationTurn, op: SessionOperation): Promise<void> {
+    if (!isCurrent(op) || connectedTurns.has(turn.id)) return;
+    const connection = connections.get(turn.id);
+    if (!connection) return;
+    connectedTurns.add(turn.id);
+    turn.status = 'running';
+    turn.error = '';
+    turn.canReconnect = false;
+    const options = {
+      after: turn.cursor,
+      workflowId: turn.workflowId,
+      onReconnect: (attempt: number, maxAttempts: number, delayMs: number) => {
+        if (!isCurrent(op)) return;
+        append(
+          'progress',
+          `连接中断，${delayMs / 1000} 秒后尝试恢复（${attempt}/${maxAttempts}）`,
+          { stage: 'reconnect', attempt, max_attempts: maxAttempts, delay_ms: delayMs },
+          turn,
+        );
+      },
+    };
+    try {
+      const onEvent = (event: AiServerEvent) => onStreamEvent(event, turn, op);
+      if (connection.kind === 'message')
+        await streamAiMessage(connection.sessionId, connection.body, onEvent, op.signal, options);
+      else
+        await streamAiWorkflowEvents(
+          connection.workflowId,
+          Number(turn.cursor) || 0,
+          onEvent,
+          op.signal,
+          options,
+        );
+    } catch (cause: unknown) {
+      if (!isCurrent(op)) return;
+      turn.status = cause instanceof AiStreamError && !cause.retryable ? 'failed' : 'interrupted';
+      turn.error = cause instanceof Error ? cause.message : 'AI 连接中断';
+      turn.canReconnect = turn.status === 'interrupted';
+    } finally {
+      if (isCurrent(op)) connectedTurns.delete(turn.id);
     }
   }
 
   async function send(): Promise<void> {
     const text = input.value.trim();
-    if (!text || sending.value || !configured.value) return;
+    if (
+      !text ||
+      sending.value ||
+      closingSession.value ||
+      turns.value.some((turn) => turn.canReconnect) ||
+      !configured.value
+    )
+      return;
+    const op = operation();
     input.value = '';
     error.value = '';
-    append('user', text);
-    sending.value = true;
-    activeStream?.abort();
-    activeStream = new AbortController();
+    const turn = createTurn(undefined, newId('request'));
+    append('user', text, undefined, turn);
     try {
-      const id = await ensureSession();
-      await streamAiMessage(
-        id,
-        { text, request_id: newId('request'), workspace: workspace.value },
-        onStreamEvent,
-        activeStream.signal,
-      );
-      sending.value = false;
+      const id = await ensureSession(op);
+      requireCurrent(op);
+      const body = {
+        text,
+        request_id: turn.requestId || newId('request'),
+        workspace: JSON.parse(JSON.stringify(workspace.value)) as AiWorkspaceContext,
+      };
+      connections.set(turn.id, { kind: 'message', sessionId: id, body });
+      await connectTurn(turn, op);
     } catch (cause: unknown) {
-      if (activeStream.signal.aborted) return;
-      const message = cause instanceof Error ? cause.message : 'AI 请求失败';
-      error.value = message;
-      append('error', message);
-      sending.value = false;
+      if (!isCurrent(op)) return;
+      turn.error = cause instanceof Error ? cause.message : 'AI 请求失败';
+      turn.status = 'failed';
     }
   }
 
-  async function applyUiCommand(command: AiUiCommand): Promise<AiActionAck> {
+  async function reconnect(turnId: string): Promise<void> {
+    if (closingSession.value) return;
+    const turn = turns.value.find((item) => item.id === turnId);
+    if (!turn?.canReconnect) return;
+    error.value = '';
+    const op = operation();
+    for (const pending of pendingAcks.values()) {
+      if (pending.sessionId === sessionId.value)
+        void acknowledgeWithRetry(
+          pending.command,
+          pending.ack,
+          op,
+          pending.sessionId,
+          turns.value.find((item) => item.id === pending.turnId),
+        );
+    }
+    await connectTurn(turn, op);
+  }
+
+  function invalidateSession(): void {
+    generation += 1;
+    sessionController.abort();
+    sessionController = new AbortController();
+    connectedTurns.clear();
+    ackRetryTimers.forEach((timer) => clearTimeout(timer));
+    ackRetryTimers.clear();
+    ackInFlight.clear();
+    for (const pending of inFlightCommands.values()) {
+      if (sessionId.value && !pendingAcks.has(pending.command.action_id)) {
+        pendingAcks.set(pending.command.action_id, {
+          ...pending,
+          sessionId: sessionId.value,
+          ack: {
+            status: 'failed',
+            error: makeAiToolError('对话切换时界面操作已停止', 'UI_ACTION_CANCELLED'),
+          },
+        });
+      }
+    }
+    inFlightCommands.clear();
+  }
+
+  async function newConversation(): Promise<void> {
+    if (closingSession.value) return;
+    const previous = sessionId.value;
+    invalidateSession();
+    const op = operation();
+    closingSession.value = true;
+    error.value = '';
+    for (const turn of turns.value) {
+      if (turn.status === 'running') {
+        turn.status = 'interrupted';
+        turn.canReconnect = connections.has(turn.id);
+      }
+    }
+    try {
+      if (previous) await closeAiSession(previous, op.signal);
+      requireCurrent(op);
+      sessionId.value = undefined;
+      try {
+        sessionStorage.removeItem(SESSION_STORAGE_KEY);
+      } catch {
+        /* private browsing */
+      }
+      messages.value = [];
+      turns.value = [];
+      input.value = '';
+      connections.clear();
+      seenEvents.clear();
+      handledActionIds.clear();
+      acknowledgedActionIds.clear();
+      pendingAcks.clear();
+    } catch (cause: unknown) {
+      if (!isCurrent(op)) return;
+      error.value = `${cause instanceof Error ? cause.message : '结束旧对话失败'}。旧任务可能仍在运行，请重试新对话或恢复连接。`;
+    } finally {
+      if (isCurrent(op)) closingSession.value = false;
+    }
+  }
+
+  async function applyUiCommand(command: AiUiCommand, op: SessionOperation): Promise<AiActionAck> {
+    requireCurrent(op);
     const args = command.args || {};
     if (command.expected_revision && command.expected_revision !== contextRevision.value) {
       return {
@@ -704,7 +688,7 @@ export function useAiAssistant(): AiAssistant {
     }
     if (
       workspaceStore.inProgress.value &&
-      ['set_existing_aoi', 'load_phase', 'load_phases', 'select_region'].includes(command.action)
+      ['set_existing_aoi', 'load_phase', 'load_phases', 'select_region', 'submit_detection'].includes(command.action)
     ) {
       return {
         status: 'rejected',
@@ -714,6 +698,14 @@ export function useAiAssistant(): AiAssistant {
       };
     }
     switch (command.action) {
+      case 'submit_detection': {
+        try {
+          const result = await workspaceStore.submitDetection(args as unknown as DetectionRequest, () => isCurrent(op));
+          return { status: 'applied', context_revision: contextRevision.value, workspace: workspace.value, result };
+        } catch (cause: unknown) {
+          return { status: 'failed', context_revision: contextRevision.value, workspace: workspace.value, error: makeAiToolError(cause instanceof Error ? cause.message : '检测提交失败', 'DETECTION_SUBMIT_FAILED') };
+        }
+      }
       case 'set_existing_aoi': {
         const bounds = parseBounds(args.bounds);
         const aoi = parsePolygon(args.aoi);
@@ -764,7 +756,7 @@ export function useAiAssistant(): AiAssistant {
           { west: bounds[0], south: bounds[1], east: bounds[2], north: bounds[3] },
           aoi,
         );
-        return { status: 'applied', context_revision: bumpRevision(), workspace: workspace.value };
+        return { status: 'applied', context_revision: contextRevision.value, workspace: workspace.value };
       }
       case 'load_phase':
       case 'load_phases': {
@@ -810,7 +802,7 @@ export function useAiAssistant(): AiAssistant {
             };
         }
         phaseIds.forEach((id) => workspaceStore.addPhase(id));
-        return { status: 'applied', context_revision: bumpRevision(), workspace: workspace.value };
+        return { status: 'applied', context_revision: contextRevision.value, workspace: workspace.value };
       }
       case 'select_region': {
         const regionId = stringValue(args.region_id);
@@ -821,7 +813,8 @@ export function useAiAssistant(): AiAssistant {
             workspace: workspace.value,
             error: makeAiToolError('缺少 region_id', 'UI_ACTION_INVALID'),
           };
-        const collection = await getRegionData<RegionCollection>('/py/local/regions');
+        const collection = await getRegionData<RegionCollection>('/py/local/regions', op.signal);
+        requireCurrent(op);
         const feature = collection.features.find(
           (item) => item.id === regionId || item.properties.region_id === regionId,
         );
@@ -832,9 +825,10 @@ export function useAiAssistant(): AiAssistant {
             workspace: workspace.value,
             error: makeAiToolError('找不到请求的行政区', 'REGION_NOT_FOUND'),
           };
-        await workspaceStore.selectWorkspaceRegion(feature);
+        await workspaceStore.selectWorkspaceRegion(feature, () => isCurrent(op), op.signal);
+        requireCurrent(op);
         getAiMapAdapter()?.selectRegion?.(regionId);
-        return { status: 'applied', context_revision: bumpRevision(), workspace: workspace.value };
+        return { status: 'applied', context_revision: contextRevision.value, workspace: workspace.value };
       }
       case 'show_task':
       case 'show_result': {
@@ -848,11 +842,13 @@ export function useAiAssistant(): AiAssistant {
           };
         let pair = workspaceStore.pairs.value.find((item) => item.taskId === taskId);
         if (!pair) {
-          const task = await getAiTask(taskId);
+          const task = await getAiTask(taskId, op.signal);
+          requireCurrent(op);
           const [before, after] = await Promise.all([
-            getAiImage(task.before_id),
-            getAiImage(task.after_id),
+            getAiImage(task.before_id, op.signal),
+            getAiImage(task.after_id, op.signal),
           ]);
+          requireCurrent(op);
           pair = {
             key: `${before.id}:${after.id}`,
             before: { ...before, phase: 'before' },
@@ -866,8 +862,16 @@ export function useAiAssistant(): AiAssistant {
           if (pair.status === 'succeeded') {
             const bounds = pairBounds(before, after);
             const payload = bounds
-              ? await workspaceStore.loadResultOverlay(taskId, undefined, bounds, pair)
+              ? await workspaceStore.loadResultOverlay(
+                  taskId,
+                  undefined,
+                  bounds,
+                  pair,
+                  () => isCurrent(op),
+                  op.signal,
+                )
               : undefined;
+            requireCurrent(op);
             if (payload) {
               pair.stats = payload.stats;
               pair.geojson = payload.geojson;
@@ -878,11 +882,13 @@ export function useAiAssistant(): AiAssistant {
         }
         workspaceStore.selectedPairKey.value = pair.key;
         await router.push(command.action === 'show_task' ? '/comparison' : '/reports');
-        return { status: 'applied', context_revision: bumpRevision(), workspace: workspace.value };
+        requireCurrent(op);
+        return { status: 'applied', context_revision: contextRevision.value, workspace: workspace.value };
       }
       case 'open_report':
         await router.push('/reports');
-        return { status: 'applied', context_revision: bumpRevision(), workspace: workspace.value };
+        requireCurrent(op);
+        return { status: 'applied', context_revision: contextRevision.value, workspace: workspace.value };
       case 'fly_to_bounds': {
         const bounds = parseBounds(args.bounds);
         const adapter = getAiMapAdapter();
@@ -895,7 +901,7 @@ export function useAiAssistant(): AiAssistant {
           };
         // AI bounds remain in the WGS84 wire order through the typed adapter.
         adapter.flyToBounds(bounds);
-        return { status: 'applied', context_revision: bumpRevision(), workspace: workspace.value };
+        return { status: 'applied', context_revision: contextRevision.value, workspace: workspace.value };
       }
       default:
         return {
@@ -907,14 +913,23 @@ export function useAiAssistant(): AiAssistant {
     }
   }
 
-  async function handleUiCommand(command: AiUiCommand): Promise<void> {
+  async function handleUiCommand(
+    command: AiUiCommand,
+    op = operation(),
+    turn?: AiConversationTurn,
+  ): Promise<void> {
+    if (!isCurrent(op)) return;
+    const id = sessionId.value;
+    if (!id) return;
     if (handledActionIds.has(command.action_id)) {
       const pending = pendingAcks.get(command.action_id);
-      if (pending) void acknowledgeWithRetry(pending.command, pending.ack);
+      if (pending)
+        void acknowledgeWithRetry(pending.command, pending.ack, op, pending.sessionId, turn);
       return;
     }
     handledActionIds.add(command.action_id);
-    const acknowledgement = await applyUiCommand(command).catch(
+    inFlightCommands.set(command.action_id, { command, turnId: turn?.id });
+    const acknowledgement = await applyUiCommand(command, op).catch(
       (cause: unknown): AiActionAck => ({
         status: 'rejected',
         context_revision: contextRevision.value,
@@ -925,31 +940,32 @@ export function useAiAssistant(): AiAssistant {
         ),
       }),
     );
+    if (!isCurrent(op)) return;
+    inFlightCommands.delete(command.action_id);
     if (acknowledgement.status === 'rejected' && acknowledgement.error)
-      append('error', acknowledgement.error.message);
-    await acknowledgeWithRetry(command, acknowledgement);
+      append('error', acknowledgement.error.message, undefined, turn);
+    await acknowledgeWithRetry(command, acknowledgement, op, id, turn);
   }
 
   const recheckConfigured = () => {
-    if (route.path === '/overview') void refreshConfigured(false).then(restoreStoredSession);
+    if (route.path === '/overview') void refreshConfigured(false);
   };
   onMounted(() => {
-    void refreshConfigured(true).then(restoreStoredSession);
+    void refreshConfigured(true);
     window.addEventListener('focus', recheckConfigured);
     document.addEventListener('visibilitychange', recheckConfigured);
   });
   watch(
     () => route.path,
     (path) => {
-      if (path === '/overview') void refreshConfigured(false).then(restoreStoredSession);
+      if (path === '/overview') void refreshConfigured(false);
     },
   );
   onUnmounted(() => {
+    disposed = true;
     window.removeEventListener('focus', recheckConfigured);
     document.removeEventListener('visibilitychange', recheckConfigured);
-    activeStream?.abort();
-    workflowStreams.forEach((controller) => controller.abort());
-    ackRetryTimers.forEach((timer) => clearTimeout(timer));
+    invalidateSession();
   });
 
   return {
@@ -957,12 +973,16 @@ export function useAiAssistant(): AiAssistant {
     open,
     input,
     sending,
+    closingSession,
     error,
     messages,
+    turns,
     workspace,
     toggle,
     close,
     send,
+    newConversation,
+    reconnect,
     handleUiCommand,
   };
 }

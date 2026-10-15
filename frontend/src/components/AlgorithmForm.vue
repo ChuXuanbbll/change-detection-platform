@@ -1,10 +1,8 @@
 <script setup lang="ts">
-import { reactive, ref, computed, watch, onMounted } from 'vue';
+import { computed, onMounted } from 'vue';
 import { models, settingsState, refreshSettings, managementError } from '../utils/settings';
 import { useWorkspace } from '../composables/useWorkspace';
-const { inProgress } = useWorkspace();
-const selected = ref('');
-const params = reactive<Record<string, number>>({});
+const { inProgress, selectedModel: selected, detectionSettings: params } = useWorkspace();
 const available = computed(() => models.value.filter((m) => m.status === 'ready' && m.enabled));
 const labels: Record<string, string> = {
   threshold: '变化阈值',
@@ -12,31 +10,9 @@ const labels: Record<string, string> = {
   kernel_size: '形态学核（像元）',
   min_area_pixels: '最小图斑（像元）',
 };
-function defaults() {
-  if (inProgress.value || !settingsState.value) return;
-  Object.assign(params, settingsState.value.settings.detection);
-  selected.value = settingsState.value.settings.default_model;
-}
-watch([() => settingsState.value?.revision, inProgress], defaults);
-onMounted(async () => {
-  try {
-    await refreshSettings();
-    defaults();
-  } catch {
-    /* visible error */
-  }
+onMounted(() => {
+  void refreshSettings().catch(() => {});
 });
-function getSelected() {
-  if (!settingsState.value?.effective || !available.value.some((m) => m.id === selected.value))
-    return;
-  return {
-    algorithm: 'hebei_onnx',
-    model_id: selected.value,
-    config_revision: settingsState.value.revision,
-    params: { ...params },
-  };
-}
-defineExpose({ getSelected });
 </script>
 <template>
   <div class="panel p-3 space-y-3">

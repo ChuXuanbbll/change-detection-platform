@@ -10,14 +10,16 @@ import (
 )
 
 type Session struct {
-	ID          string                   `json:"id"`
-	CreatedAt   time.Time                `json:"created_at"`
-	UpdatedAt   time.Time                `json:"updated_at"`
-	SkillID     string                   `json:"skill_id,omitempty"`
-	Messages    []SessionMessage         `json:"messages,omitempty"`
-	Workspace   map[string]any           `json:"workspace,omitempty"`
-	WorkflowIDs []string                 `json:"workflow_ids,omitempty"`
-	Actions     map[string]PendingAction `json:"actions,omitempty"`
+	ID            string                   `json:"id"`
+	CreatedAt     time.Time                `json:"created_at"`
+	UpdatedAt     time.Time                `json:"updated_at"`
+	SkillID       string                   `json:"skill_id,omitempty"`
+	Messages      []SessionMessage         `json:"messages,omitempty"`
+	Workspace     map[string]any           `json:"workspace,omitempty"`
+	WorkflowIDs   []string                 `json:"workflow_ids,omitempty"`
+	Actions       map[string]PendingAction `json:"actions,omitempty"`
+	ClosedAt      *time.Time               `json:"closed_at,omitempty"`
+	PendingIntent *Intent                  `json:"pending_intent,omitempty"`
 }
 
 type SessionMessage struct {
@@ -29,10 +31,14 @@ type SessionMessage struct {
 	ToolCallID string           `json:"tool_call_id,omitempty"`
 	Data       map[string]any   `json:"data,omitempty"`
 	Provider   *ProviderMessage `json:"provider,omitempty"`
+	WorkflowID string           `json:"workflow_id,omitempty"`
+	Phase      string           `json:"phase,omitempty"`
 }
 
 type PendingAction struct {
+	OperationIndex int        `json:"operation_index,omitempty"`
 	ID             string     `json:"id"`
+	WorkflowID     string     `json:"workflow_id,omitempty"`
 	Command        UICommand  `json:"command"`
 	Status         string     `json:"status"`
 	Fingerprint    string     `json:"fingerprint,omitempty"`
@@ -54,15 +60,18 @@ type Workflow struct {
 	Events             []WorkflowEvent    `json:"events,omitempty"`
 	CreatedAt          time.Time          `json:"created_at"`
 	UpdatedAt          time.Time          `json:"updated_at"`
+	Intent             *Intent            `json:"intent,omitempty"`
+	OperationIndex     int                `json:"operation_index,omitempty"`
 }
 
 type WorkflowToolCall struct {
-	Tool      string         `json:"tool"`
-	Version   string         `json:"version"`
-	Status    string         `json:"status"`
-	RequestID string         `json:"request_id"`
-	Input     map[string]any `json:"input,omitempty"`
-	Data      any            `json:"data,omitempty"`
+	Tool           string         `json:"tool"`
+	Version        string         `json:"version"`
+	Status         string         `json:"status"`
+	RequestID      string         `json:"request_id"`
+	Input          map[string]any `json:"input,omitempty"`
+	Data           any            `json:"data,omitempty"`
+	OperationIndex int            `json:"operation_index,omitempty"`
 }
 type WorkflowEvent struct {
 	ID        int64     `json:"id"`
@@ -169,8 +178,30 @@ func (r *repository) save(name string, value any) error {
 func (r *repository) upsertSession(s Session) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// A worker may finish an in-flight write after the close endpoint returns.
+	// Preserve the durable close barrier and cancelled UI actions in that case.
+	if prior, ok := r.sessions[s.ID]; ok && prior.ClosedAt != nil {
+		s.ClosedAt = prior.ClosedAt
+		for id, action := range prior.Actions {
+			if action.Status == "cancelled" {
+				if s.Actions == nil {
+					s.Actions = make(map[string]PendingAction)
+				}
+				s.Actions[id] = action
+			}
+		}
+	}
+	prior, existed := r.sessions[s.ID]
 	r.sessions[s.ID] = cloneSession(s)
-	return r.save("sessions.json", r.sessions)
+	if err := r.save("sessions.json", r.sessions); err != nil {
+		if existed {
+			r.sessions[s.ID] = prior
+		} else {
+			delete(r.sessions, s.ID)
+		}
+		return err
+	}
+	return nil
 }
 func (r *repository) getSession(id string) (Session, bool) {
 	r.mu.Lock()
@@ -193,8 +224,45 @@ func (r *repository) listSessions() []Session {
 func (r *repository) upsertWorkflow(w Workflow) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// Cancellation wins over stale worker snapshots, including final results.
+	if prior, ok := r.workflows[w.ID]; ok && prior.Status == "cancelled" {
+		return nil
+	}
+	prior, existed := r.workflows[w.ID]
 	r.workflows[w.ID] = cloneWorkflow(w)
-	return r.save("workflows.json", r.workflows)
+	if err := r.save("workflows.json", r.workflows); err != nil {
+		if existed {
+			r.workflows[w.ID] = prior
+		} else {
+			delete(r.workflows, w.ID)
+		}
+		return err
+	}
+	return nil
+}
+
+// cancelChatWorkflow atomically appends the terminal event. Only this method
+// writes cancelled workflows; stale workers can never replace the terminal.
+func (r *repository) cancelChatWorkflow(id string) (Workflow, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	w, ok := r.workflows[id]
+	if !ok {
+		return Workflow{}, fmt.Errorf("workflow not found")
+	}
+	if w.Status == "succeeded" || w.Status == "failed" || w.Status == "cancelled" {
+		return cloneWorkflow(w), nil
+	}
+	prior := cloneWorkflow(w)
+	w.Status = "cancelled"
+	w.UpdatedAt = time.Now().UTC()
+	w.Events = append(w.Events, WorkflowEvent{ID: int64(len(w.Events) + 1), Type: "cancelled", Data: map[string]any{"status": "cancelled", "message": "已停止 AI 编排，已提交的检测任务继续运行。"}, CreatedAt: w.UpdatedAt})
+	r.workflows[id] = cloneWorkflow(w)
+	if err := r.save("workflows.json", r.workflows); err != nil {
+		r.workflows[id] = prior
+		return Workflow{}, err
+	}
+	return cloneWorkflow(w), nil
 }
 func (r *repository) getWorkflow(id string) (Workflow, bool) {
 	r.mu.Lock()
@@ -204,6 +272,22 @@ func (r *repository) getWorkflow(id string) (Workflow, bool) {
 		w = cloneWorkflow(w)
 	}
 	return w, ok
+}
+
+// If storage fails even while reporting failure, keep live subscribers from
+// waiting forever. This fallback is explicitly non-durable and reports that
+// limitation instead of claiming that a result was saved.
+func (r *repository) failWorkflowInMemory(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	w, ok := r.workflows[id]
+	if !ok || w.Status == "cancelled" {
+		return
+	}
+	w.Status = "failed"
+	w.UpdatedAt = time.Now().UTC()
+	w.Events = append(w.Events, WorkflowEvent{ID: int64(len(w.Events) + 1), Type: "error", Data: map[string]any{"code": "AI_PERSISTENCE_FAILED", "message": "AI 状态保存失败，当前过程已停止。请检查服务器存储；已创建检测任务仍可在任务页查看。", "retryable": false}, CreatedAt: w.UpdatedAt})
+	r.workflows[id] = cloneWorkflow(w)
 }
 func (r *repository) listWorkflows() []Workflow {
 	r.mu.Lock()

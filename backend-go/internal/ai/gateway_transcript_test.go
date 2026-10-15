@@ -22,6 +22,12 @@ type gatewayTranscriptTestProvider struct {
 }
 
 func (p *gatewayTranscriptTestProvider) Complete(_ context.Context, request CompletionRequest) (CompletionResponse, error) {
+	if request.Stage == "skill_selection" {
+		return fixtureSkillSelection(request), nil
+	}
+	if request.Stage == "intent" {
+		return gatewayTestIntentResponse(), nil
+	}
 	p.mu.Lock()
 	p.requests = append(p.requests, cloneGatewayTranscriptRequest(request))
 	callNumber := len(p.requests)
@@ -51,7 +57,7 @@ func cloneGatewayTranscriptRequest(request CompletionRequest) CompletionRequest 
 	encoded, _ := json.Marshal(request.Messages)
 	var messages []ProviderMessage
 	_ = json.Unmarshal(encoded, &messages)
-	return CompletionRequest{Messages: messages, Tools: append([]ProviderTool(nil), request.Tools...)}
+	return CompletionRequest{Messages: messages, Tools: append([]ProviderTool(nil), request.Tools...), Stage: request.Stage}
 }
 
 func TestGatewayUIAckTranscriptSurvivesLaterTurnsAndRestart(t *testing.T) {

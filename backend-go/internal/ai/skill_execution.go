@@ -23,6 +23,12 @@ func (g *Gateway) executeSkillTool(ctx context.Context, workflow *Workflow, call
 			if returned := dataString(result.Data, "task_id"); returned != "" && returned != taskID {
 				return Result{SchemaVersion: schemaVersion, RequestID: call.RequestID, Tool: call.Tool, ToolVersion: call.ToolVersion, Status: "error", Error: &ToolError{Code: "TASK_ID_MISMATCH", Message: "task status returned a different task", Retryable: false}}
 			}
+			if workflow.Intent != nil && workflow.OperationIndex < len(workflow.Intent.Operations) {
+				op := workflow.Intent.Operations[workflow.OperationIndex]
+				if op.SkillID == "result.inspect.v1" && (stringValue(op.Slots["operation"]) == "status" || stringValue(op.Slots["operation"]) == "query_tasks") {
+					return result
+				}
+			}
 			if isPendingStatus(dataString(result.Data, "status")) {
 				return g.waitForTask(ctx, call, taskID)
 			}
@@ -49,7 +55,7 @@ func (g *Gateway) executeSkillTool(ctx context.Context, workflow *Workflow, call
 	terminal, statusCall := g.waitForOperation(ctx, call, operationID)
 	terminal = preserveCallIdentity(terminal, call)
 	if call.Tool == "imagery.prepare" {
-		workflow.ToolCalls = append(workflow.ToolCalls, WorkflowToolCall{Tool: "operation.status", Version: statusCall.ToolVersion, Status: workflowCallStatus(terminal), RequestID: statusCall.RequestID, Input: statusCall.Input, Data: terminal.Data})
+		workflow.ToolCalls = append(workflow.ToolCalls, WorkflowToolCall{Tool: "operation.status", Version: statusCall.ToolVersion, Status: workflowCallStatus(terminal), RequestID: statusCall.RequestID, Input: statusCall.Input, Data: terminal.Data, OperationIndex: workflow.OperationIndex})
 		workflow.UpdatedAt = time.Now().UTC()
 		_ = g.repo.upsertWorkflow(*workflow)
 	}
@@ -189,7 +195,7 @@ func (g *Gateway) skillPrerequisitesSatisfied(workflow *Workflow, tool string, i
 		}
 		satisfied := false
 		for _, call := range workflow.ToolCalls {
-			if call.Tool == prerequisite && call.Status == "ok" && resourceMatches(call, tool, input) {
+			if call.OperationIndex == workflow.OperationIndex && call.Tool == prerequisite && call.Status == "ok" && resourceMatches(call, tool, input) {
 				satisfied = true
 				break
 			}

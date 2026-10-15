@@ -3,6 +3,8 @@
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { runAiReliabilityChecks } from "./test_ai_browser_reliability.mjs";
+import { runAiDetectionChecks } from "./test_ai_detection_browser.mjs";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
@@ -192,7 +194,8 @@ function json(route, data, status = 200) {
 function sse(route, events) {
   const body = events
     .map(
-      ({ type, data }) => `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`,
+      ({ type, data, id }) =>
+        `${id == null ? "" : `id: ${id}\n`}event: ${type}\ndata: ${JSON.stringify(data)}\n\n`,
     )
     .join("");
   return route.fulfill({ status: 200, contentType: "text/event-stream", body });
@@ -291,7 +294,11 @@ function fixtureForPage(page) {
         };
       } else if (activePhaseProbe) {
         if (activePhaseMessageCount++ === 0)
-          command = { action_id: "action-active-phase-seed", action: "unsupported_action", args: {} };
+          command = {
+            action_id: "action-active-phase-seed",
+            action: "unsupported_action",
+            args: {},
+          };
         else
           command = {
             action_id: "action-active-phase-stale",
@@ -330,7 +337,8 @@ function fixtureForPage(page) {
           },
         },
         { type: "ui_command", data: command },
-        { type: "final", data: { message: "操作已完成" } },
+        { type: "text_delta", data: { text: "操作已完成" } },
+        { type: "final", data: { status: "succeeded" } },
       ];
       workflowEvents = events.map((event, index) => ({
         id: index + 1,
@@ -727,75 +735,53 @@ try {
       path: path.join(output, "desktop.png"),
       fullPage: true,
     });
-    // The persisted session/workflow contains the last command. Reload must replay it as history
-    // and never submit a second acknowledgement.
+    // Completed geometry and phases survive navigation within this document.
+    assert.equal(await page.locator('.leaflet-cdp-area-pane path[stroke="#22d3ee"]').count(), 1);
+    await page.locator('.app-nav .nav-item[href="/comparison"]').click();
+    await page.locator('.app-nav .nav-item[href="/overview"]').click();
+    await waitForAssistant(page);
+    assert.equal(await page.locator('.ai-turn').count(), 4);
+    assert.equal(await page.locator('.leaflet-cdp-area-pane path[stroke="#22d3ee"]').count(), 1);
+    assert.equal(await page.locator('.phase-tab').count(), 1);
     const beforeReloadAcks = acknowledgements.length;
+    const beforeRequests = [];
+    page.on('request', (request) => {
+      if (/\/api\/ai\/(sessions|workflows)/.test(new URL(request.url()).pathname))
+        beforeRequests.push(request.url());
+    });
     resumeWorkflows = true;
     pendingActionRecovery = true;
-    await page.reload();
-    await waitForAssistant(page);
-    await page.getByText("刷新后工作流仍在运行", { exact: true }).waitFor();
-    await page.getByText("恢复的工作流已完成", { exact: true }).waitFor();
-    await waitForAckCount(page, beforeReloadAcks + 1);
-    await page.getByText("恢复后的操作流已完成", { exact: true }).waitFor();
-    assert.equal(
-      acknowledgements.filter(
-        (item) => item.id === pendingRestoreCommand.action_id,
-      ).length,
-      1,
-      "pending UI action and duplicate live event must produce one acknowledgement",
-    );
-    assert.equal(
-      acknowledgements.length,
-      beforeReloadAcks + 1,
-      "refresh may recover one pending action but must not duplicate completed actions",
-    );
-    assert.ok(
-      (await page.locator(".ai-message").allTextContents()).some((text) =>
-        text.includes("已恢复界面操作"),
-      ),
-    );
-    report.checks.push(
-      "session/workflow refresh recovery, running-workflow SSE, and no duplicate UI command",
-    );
-    await page.close();
-  }
-  {
-    messageCount = 0;
-    resumeWorkflows = false;
-    pendingActionRecovery = false;
-    terminalActionRecovery = false;
-    const page = await browser.newPage({
-      viewport: { width: 1280, height: 800 },
+    restoreWorkspaceSnapshot = true;
+    await page.evaluate(() => {
+      sessionStorage.setItem('change-detection.ai.session', 'session-fixture');
+      sessionStorage.setItem('change-detection.ai.context-revision', 'workspace-restored');
     });
-    page.setDefaultTimeout(15000);
-    await fixtureForPage(page);
-    await page.goto(`${url.split("/overview")[0]}/overview`);
-    await waitForAssistant(page);
-    await sendAndWait(
-      page,
-      "建立终态恢复 fixture",
-      1,
-      acknowledgements.length + 1,
-    );
-    const beforeTerminalReload = acknowledgements.length;
-    terminalActionRecovery = true;
     await page.reload();
     await waitForAssistant(page);
-    await page.waitForTimeout(300);
-    assert.equal(
-      acknowledgements.length,
-      beforeTerminalReload,
-      "failed/timeout/cancelled actions must not be replayed",
-    );
-    assert.ok(
-      (await page.locator(".ai-message").allTextContents()).some((text) =>
-        text.includes("未重复执行"),
-      ),
-    );
-    report.checks.push("terminal UI action states are restored without replay");
+    await page.waitForLoadState('networkidle');
+    assert.equal(await page.locator('.ai-turn').count(), 0);
+    assert.equal(await page.locator('.leaflet-cdp-area-pane path[stroke="#22d3ee"]').count(), 0);
+    assert.equal(await page.locator('.phase-tab').count(), 0);
+    assert.equal(await page.getByRole('button', { name: '提交检测任务' }).isDisabled(), true);
+    assert.equal(acknowledgements.length, beforeReloadAcks);
+    assert.deepEqual(beforeRequests, [], 'reload must not read, reconnect, close or replay an old AI session');
+    assert.deepEqual(await page.evaluate(() => [
+      sessionStorage.getItem('change-detection.ai.session'),
+      sessionStorage.getItem('change-detection.ai.context-revision'),
+    ]), [null, null]);
+    messageCount = 0;
+    await sendAndWait(page, '刷新后的新请求', 1, beforeReloadAcks + 1);
+    const freshWorkspace = messageWorkspaces.at(-1);
+    assert.equal(freshWorkspace.region_id, undefined);
+    assert.equal(freshWorkspace.aoi, undefined);
+    assert.equal(freshWorkspace.bounds, undefined);
+    assert.equal(freshWorkspace.task_id, undefined);
+    assert.deepEqual(freshWorkspace.phase_ids, []);
+    assert.notEqual(freshWorkspace.revision, 'workspace-restored');
+    assert.equal(await page.evaluate(() => sessionStorage.getItem('change-detection.ai.session')), null);
+    report.checks.push('SPA navigation preserves AI/AOI/phases; reload clears them after catalog scan without replaying pending actions');
+    restoreWorkspaceSnapshot = false;
     await page.close();
-    terminalActionRecovery = false;
   }
   for (const [index, expectedPath, prompt] of [
     [4, "/comparison", "恢复任务"],
@@ -881,6 +867,14 @@ try {
     });
     await page.close();
   }
+  await runAiReliabilityChecks({
+    browser,
+    url,
+    fixtureForPage,
+    report,
+    output,
+  });
+  await runAiDetectionChecks({ browser, url, fixtureForPage, report, region, bounds, polygon });
   report.acknowledgements = acknowledgements;
   await fs.writeFile(
     path.join(output, "report.json"),

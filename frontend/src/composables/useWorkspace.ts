@@ -1,5 +1,5 @@
-import { computed, inject, provide, ref, watch, onUnmounted, type InjectionKey } from 'vue';
-import { settingsState, refreshSettings } from '../utils/settings';
+import { computed, inject, provide, reactive, ref, watch, onUnmounted, type InjectionKey } from 'vue';
+import { models, settingsState, refreshSettings } from '../utils/settings';
 import { useDetection, type ResultOverlayPayload } from './useDetection';
 import type { AreaBounds, AreaPolygon } from '../utils/api';
 import {
@@ -22,8 +22,53 @@ export function getAiMapAdapter(): AiMapAdapter | null {
   return aiMapAdapter;
 }
 
+export interface DetectionRequest {
+  region_id?: string;
+  phase_dates?: string[];
+  phase_ids?: string[];
+  scene_ids?: string[];
+  date_range?: { start: string; end: string; precision: 'day' | 'month' | 'year' };
+  pair_policy?: 'first_last' | 'adjacent' | 'specified';
+  aoi?: AreaPolygon;
+  model_id?: string;
+  detection_settings?: Record<string, number>;
+}
+
 function createWorkspace() {
   const detection = useDetection();
+  const selectedModel = ref('');
+  const detectionSettings = reactive<Record<string, number>>({});
+  let algorithmRevision: number | undefined;
+  watch(
+    [() => settingsState.value?.revision, detection.inProgress],
+    () => {
+      if (
+        detection.inProgress.value ||
+        !settingsState.value ||
+        algorithmRevision === settingsState.value.revision
+      )
+        return;
+      algorithmRevision = settingsState.value.revision;
+      Object.assign(detectionSettings, settingsState.value.settings.detection);
+      selectedModel.value = settingsState.value.settings.default_model;
+    },
+    { immediate: true },
+  );
+  function getDetectionSelection() {
+    if (
+      !settingsState.value?.effective ||
+      !models.value.some(
+        (model) => model.id === selectedModel.value && model.status === 'ready' && model.enabled,
+      )
+    )
+      return;
+    return {
+      algorithm: 'hebei_onnx',
+      model_id: selectedModel.value,
+      config_revision: settingsState.value.revision,
+      params: { ...detectionSettings },
+    };
+  }
   const selectedArea = ref<AreaBounds | null>(null);
   const selectedGeometry = ref<AreaPolygon | null>(null);
   const selectionEditing = ref(false);
@@ -82,7 +127,8 @@ function createWorkspace() {
   const activePhase = computed(() =>
     imageryPhases.value.find((phase) => phase.month === activeMonth.value),
   );
-  async function selectWorkspaceRegion(region: RegionFeature | null) {
+  async function selectWorkspaceRegion(region: RegionFeature | null, isCurrent = () => true, signal?: AbortSignal) {
+    if (!isCurrent() || signal?.aborted) return;
     if (detection.inProgress.value || selectedRegion.value?.id === region?.id) return;
     catalogRequest?.abort();
     selectedRegion.value = region;
@@ -94,25 +140,28 @@ function createWorkspace() {
     catalogLoading.value = false;
     detection.resetDetection();
     if (!region) return;
-    await refreshCatalog(false);
+    await refreshCatalog(false, isCurrent, signal);
   }
-  async function refreshCatalog(force = true) {
+  async function refreshCatalog(force = true, isCurrent = () => true, signal?: AbortSignal) {
+    if (!isCurrent() || signal?.aborted) return;
     const region = selectedRegion.value;
     if (!region || detection.inProgress.value) return;
     catalogRequest?.abort();
     const request = new AbortController();
+    const abort = () => request.abort();
+    signal?.addEventListener('abort', abort, { once: true });
     catalogRequest = request;
     catalogLoading.value = true;
     catalogError.value = '';
     try {
       await indexReady;
-      if (request.signal.aborted) return;
+      if (request.signal.aborted || !isCurrent()) return;
       if (indexError.value && !force) throw new Error(indexError.value);
       const data = await getRegionData<RegionScenes>(
         `/py/local/regions/${encodeURIComponent(region.id)}/scenes${force ? '?refresh=true' : ''}`,
         request.signal,
       );
-      if (!request.signal.aborted && selectedRegion.value?.id === region.id) {
+      if (!request.signal.aborted && isCurrent() && selectedRegion.value?.id === region.id) {
         indexError.value = '';
         const previous = imageryPhases.value
           .map((phase) => `${phase.id}:${phase.version}`)
@@ -127,9 +176,10 @@ function createWorkspace() {
           activeMonth.value = imageryPhases.value[0]?.month || '';
       }
     } catch (error) {
-      if (!request.signal.aborted)
+      if (!request.signal.aborted && isCurrent())
         catalogError.value = error instanceof Error ? error.message : '影像列表加载失败';
     } finally {
+      signal?.removeEventListener('abort', abort);
       if (catalogRequest === request) catalogLoading.value = false;
     }
   }
@@ -154,6 +204,153 @@ function createWorkspace() {
     if (detection.inProgress.value) return;
     const phase = imageryPhases.value.find((item) => item.month === month);
     if (phase) removePhase(phase.id);
+  }
+  // Both the page button and the typed AI command submit through this boundary.
+  async function submitDetection(request: DetectionRequest = {}, isCurrent = () => true) {
+    const fail = (message: string): never => {
+      detection.taskError.value = message;
+      throw new Error(message);
+    };
+    if (detection.inProgress.value || selectionEditing.value || catalogLoading.value)
+      fail('工作区正在编辑、加载或检测，请稍后再试');
+    const region = selectedRegion.value;
+    if (!region || (request.region_id && request.region_id !== region.id))
+      return fail('请先选择本次检测的行政区');
+    if (!selectedArea.value || !selectedGeometry.value) fail('请先在地图框选有效检测区域');
+    if (request.aoi && JSON.stringify(request.aoi) !== JSON.stringify(selectedGeometry.value))
+      fail('本次指定范围与当前框选不同，请先确认检测区域');
+    const available = catalogPhases.value.filter(
+      (phase) => phase.available && phase.region_id === region.id,
+    );
+    let phases = imageryPhases.value;
+    if (
+      request.scene_ids?.some(
+        (id) =>
+          !available.some((phase) =>
+            phase.scenes.some((scene) => scene.id === id && scene.available),
+          ),
+      )
+    )
+      fail('指定影像不在当前区域目录中');
+    if (request.phase_dates?.length) {
+      phases = request.phase_dates.map((date) => {
+        const matches = available.filter((phase) =>
+          date.length === 7
+            ? phase.month === date
+            : phase.scenes.every((scene) => scene.date_precision === 'day' && scene.date === date),
+        );
+        if (matches.length !== 1) fail(`时相 ${date} 不存在或日期精度不匹配，请确认可用时相`);
+        return matches[0];
+      });
+    } else if (request.phase_ids?.length) {
+      phases = request.phase_ids.map(
+        (id) => available.find((phase) => phase.id === id) || fail('指定时相不在当前区域目录中'),
+      );
+    } else if (request.scene_ids?.length) {
+      phases = available.filter((phase) =>
+        phase.scenes.some((scene) => request.scene_ids!.includes(scene.id)),
+      );
+    } else if (request.date_range) {
+      const { start, end, precision } = request.date_range;
+      if (precision === 'day') fail('当前按月时相检测不支持按日范围，请明确月份');
+      phases = available.filter(
+        (phase) =>
+          phase.month.slice(0, start.length) >= start && phase.month.slice(0, end.length) <= end,
+      );
+    }
+    phases = [...new Map(phases.map((phase) => [phase.id, phase])).values()].sort((a, b) =>
+      a.month.localeCompare(b.month),
+    );
+    if (
+      (request.pair_policy === 'first_last' || (request.date_range && !request.pair_policy)) &&
+      phases.length > 2
+    )
+      phases = [phases[0], phases[phases.length - 1]];
+    if (phases.length < 2) fail('至少需要两个不同月份的可用时相');
+    if (
+      request.scene_ids?.some(
+        (id) => !phases.some((phase) => phase.scenes.some((scene) => scene.id === id)),
+      )
+    )
+      fail('指定影像不属于本次选择的时相');
+    if (
+      request.date_range &&
+      phases.some(
+        (phase) =>
+          phase.month.slice(0, request.date_range!.start.length) < request.date_range!.start ||
+          phase.month.slice(0, request.date_range!.end.length) > request.date_range!.end,
+      )
+    )
+      fail('指定时相与日期范围不一致');
+    if (
+      request.phase_dates &&
+      request.phase_ids &&
+      (phases.length !== request.phase_ids.length ||
+        phases.some((phase) => !request.phase_ids!.includes(phase.id)))
+    )
+      fail('指定月份和时相不一致');
+    if (
+      request.date_range &&
+      request.phase_dates?.some(
+        (date) => date < request.date_range!.start || date > request.date_range!.end,
+      )
+    )
+      fail('指定月份与日期范围不一致');
+    const ids = phases.map((phase) => phase.id);
+    const scenes = phases.flatMap((phase) =>
+      phase.scenes.filter(
+        (scene) => scene.available && (!request.scene_ids || request.scene_ids.includes(scene.id)),
+      ),
+    );
+    if (
+      phases.some(
+        (phase) => !scenes.some((scene) => phase.scenes.some((item) => item.id === scene.id)),
+      )
+    )
+      fail('每个指定时相都必须包含可用影像');
+    if (
+      request.model_id &&
+      !models.value.some(
+        (model) => model.id === request.model_id && model.status === 'ready' && model.enabled,
+      )
+    )
+      fail('指定模型尚未就绪');
+    const overrides = request.detection_settings || {};
+    for (const [key, value] of Object.entries(overrides)) {
+      if (
+        !Number.isFinite(value) ||
+        !['threshold', 'resolution', 'kernel_size', 'min_area_pixels'].includes(key) ||
+        (key === 'threshold' && (value < 0 || value > 1)) ||
+        (key === 'resolution' && value <= 0) ||
+        (key === 'kernel_size' && (!Number.isInteger(value) || value < 1 || value > 99)) ||
+        (key === 'min_area_pixels' && (!Number.isInteger(value) || value < 0))
+      )
+        fail('检测参数无效');
+    }
+    if (!settingsState.value?.effective || (!request.model_id && !getDetectionSelection()))
+      fail('所选模型或配置尚未就绪');
+    if (request.model_id) selectedModel.value = request.model_id;
+    Object.assign(detectionSettings, overrides);
+    if (JSON.stringify(ids) !== JSON.stringify(loadedPhaseIds.value)) {
+      detection.resetDetection();
+      loadedPhaseIds.value = ids;
+      if (!phases.some((phase) => phase.month === activeMonth.value))
+        activeMonth.value = phases[0].month;
+    }
+    await detection.submitTask(
+      getDetectionSelection,
+      selectedArea.value,
+      {
+        region_id: region.id,
+        scene_ids: scenes.map((scene) => scene.id),
+        aoi: selectedGeometry.value!,
+      },
+      isCurrent,
+    );
+    if (!isCurrent()) throw new DOMException('Session changed', 'AbortError');
+    if (!detection.currentTaskId.value || detection.taskStatus.value === 'failed')
+      fail(detection.taskError.value || '检测未成功提交');
+    return { task_id: detection.currentTaskId.value, pair_count: detection.pairs.value.length };
   }
   const selectedPairKey = ref('');
   const results = ref<ResultOverlayPayload[]>([]);
@@ -218,6 +415,10 @@ function createWorkspace() {
   });
   return {
     ...detection,
+    selectedModel,
+    detectionSettings,
+    getDetectionSelection,
+    submitDetection,
     selectedArea,
     selectedGeometry,
     selectionEditing,

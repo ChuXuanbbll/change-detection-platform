@@ -1,14 +1,22 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue';
-import { useAiAssistant, type AiTimelineEntry } from '../composables/useAiAssistant';
-import { safeAiDownloadRef } from '../utils/ai';
+import {
+  useAiAssistant,
+  type AiTimelineEntry,
+  type AiConversationTurn,
+} from '../composables/useAiAssistant';
+import { safeAiResourceReferences } from '../utils/ai';
+import { renderAiMarkdown } from '../utils/aiMarkdown';
 const props = defineProps<{ visible: boolean }>();
 
 const assistant = useAiAssistant();
 const inputRef = ref<HTMLTextAreaElement | null>(null);
 const panelRef = ref<HTMLElement | null>(null);
 const messageListRef = ref<HTMLElement | null>(null);
-const visibleMessages = computed(() => assistant.messages.value.slice(-80));
+const visibleTurns = computed(() => assistant.turns.value.slice(-40));
+const processViewports = new Map<string, HTMLElement>();
+const processFollowing = new Map<string, boolean>();
+let followMessages = true;
 
 function focusInput(): void {
   void nextTick(() => inputRef.value?.focus());
@@ -25,6 +33,7 @@ function onKeydown(event: KeyboardEvent): void {
     assistant.close();
     return;
   }
+  if (event.target !== inputRef.value) return;
   if (event.key === 'Enter' && !event.shiftKey) {
     event.preventDefault();
     void assistant.send();
@@ -52,14 +61,77 @@ function entryLabel(entry: AiTimelineEntry): string {
   }
 }
 
-function downloadRef(entry: AiTimelineEntry): string | undefined {
-  if (entry.kind !== 'tool') return undefined;
-  const detail = entry.detail;
-  if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
-    const record = detail as Record<string, unknown>;
-    return safeAiDownloadRef(record) || safeAiDownloadRef(record.data);
+function turnDownloads(turn: AiConversationTurn): string[] {
+  return safeAiResourceReferences(turn.entries.map((entry) => entry.detail)).downloads;
+}
+
+function turnResources(turn: AiConversationTurn): string[] {
+  const labels = {
+    task_id: '任务',
+    result_id: '结果',
+    workflow_id: '工作流',
+    operation_id: '准备操作',
+  };
+  return safeAiResourceReferences(turn.entries.map((entry) => entry.detail)).resources.map(
+    (resource) => `${labels[resource.kind]}：${resource.id}`,
+  );
+}
+
+function processEntries(turn: AiConversationTurn): AiTimelineEntry[] {
+  return turn.entries.filter(
+    (entry) => !['user', 'final', 'error'].includes(entry.kind) && entry.phase !== 'final',
+  );
+}
+
+function turnErrors(turn: AiConversationTurn): string[] {
+  return [
+    ...new Set(
+      [
+        ...turn.entries.filter((entry) => entry.kind === 'error').map((entry) => entry.text),
+        turn.error,
+      ].filter(Boolean),
+    ),
+  ];
+}
+
+function processStatus(turn: AiConversationTurn): string {
+  return {
+    running: '执行中',
+    succeeded: '已完成',
+    failed: '执行失败',
+    cancelled: '已取消',
+    interrupted: '连接中断',
+  }[turn.status];
+}
+
+function setProcessViewport(turnId: string, value: unknown): void {
+  if (value instanceof HTMLElement) processViewports.set(turnId, value);
+  else {
+    processViewports.delete(turnId);
+    processFollowing.delete(turnId);
   }
-  return safeAiDownloadRef(detail);
+}
+
+function onMessageScroll(): void {
+  const list = messageListRef.value;
+  if (list) followMessages = list.scrollHeight - list.scrollTop - list.clientHeight < 32;
+}
+
+function onProcessScroll(turnId: string): void {
+  const viewport = processViewports.get(turnId);
+  if (viewport)
+    processFollowing.set(
+      turnId,
+      viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 24,
+    );
+}
+
+async function startNewConversation(): Promise<void> {
+  await assistant.newConversation();
+  if (!assistant.error.value) {
+    followMessages = true;
+    focusInput();
+  }
 }
 
 function panelOrigin(element: Element): void {
@@ -93,11 +165,21 @@ watch(
   },
 );
 watch(
-  () => assistant.messages.value.length,
+  () =>
+    assistant.turns.value
+      .map(
+        (turn) =>
+          `${turn.id}:${turn.status}:${turn.result}:${turn.error}:${turn.entries.length}:${turn.entries[turn.entries.length - 1]?.text || ''}`,
+      )
+      .join('\0'),
   () => {
     void nextTick(() => {
       const list = messageListRef.value;
-      if (list) list.scrollTop = list.scrollHeight;
+      if (list?.isConnected && followMessages) list.scrollTop = list.scrollHeight;
+      for (const [turnId, viewport] of processViewports) {
+        if (viewport.isConnected && processFollowing.get(turnId) !== false)
+          viewport.scrollTop = viewport.scrollHeight;
+      }
     });
   },
 );
@@ -139,6 +221,14 @@ watch(
               <h2 id="ai-dialog-title">自然语言助手</h2>
             </div>
             <div class="ai-dialog-actions">
+              <button
+                class="ai-new-conversation"
+                type="button"
+                :disabled="assistant.closingSession.value"
+                @click="startNewConversation"
+              >
+                {{ assistant.closingSession.value ? '正在结束旧对话…' : '新对话' }}
+              </button>
               <span v-if="assistant.sending.value" class="ai-live-status" role="status"
                 >处理中</span
               >
@@ -154,48 +244,114 @@ watch(
             </div>
           </header>
 
-          <div
-            ref="messageListRef"
-            class="ai-message-list"
-            aria-live="polite"
-            aria-relevant="additions text"
-          >
-            <div v-if="!visibleMessages.length" class="ai-empty-state">
+          <div ref="messageListRef" class="ai-message-list" @scroll="onMessageScroll">
+            <div v-if="!visibleTurns.length" class="ai-empty-state">
               <span class="ai-empty-glyph" aria-hidden="true">✦</span>
               <p>描述要查询的区域、时相或检测结果</p>
               <span>例如：查询雄县 2025 年 1 月到 7 月的变化</span>
             </div>
-            <article
-              v-for="entry in visibleMessages"
-              :key="entry.id"
-              class="ai-message"
-              :class="`is-${entry.kind}`"
+            <section
+              v-for="turn in visibleTurns"
+              :key="turn.id"
+              class="ai-turn"
+              :data-turn-id="turn.id"
+              :data-status="turn.status"
             >
-              <div class="ai-message-meta">
-                <span>{{ entryLabel(entry) }}</span
-                ><span
-                  v-if="entry.kind === 'assistant' && entry.detail === 'streaming'"
-                  class="ai-streaming-dot"
-                  aria-label="正在生成"
-                />
-              </div>
-              <p>{{ entry.text }}</p>
-              <a
-                v-if="downloadRef(entry)"
-                class="ai-download-link"
-                :href="downloadRef(entry)"
-                download
+              <article
+                v-for="entry in turn.entries.filter((entry) => entry.kind === 'user')"
+                :key="entry.id"
+                class="ai-message is-user"
               >
-                下载结果
-              </a>
+                <div class="ai-message-meta">你</div>
+                <p>{{ entry.text }}</p>
+              </article>
               <details
-                v-if="entry.detail && entry.kind !== 'assistant' && entry.kind !== 'user'"
-                class="ai-message-detail"
+                v-if="processEntries(turn).length || turn.status === 'running'"
+                class="ai-turn-process"
+                :open="turn.status === 'running'"
               >
-                <summary>查看事件数据</summary>
-                <pre>{{ JSON.stringify(entry.detail, null, 2) }}</pre>
+                <summary>
+                  <span role="status">{{ processStatus(turn) }}</span
+                  ><span> · 执行过程（{{ processEntries(turn).length }}）</span>
+                </summary>
+                <div
+                  :ref="(element) => setProcessViewport(turn.id, element)"
+                  class="ai-process-viewport"
+                  @scroll="onProcessScroll(turn.id)"
+                >
+                  <p v-if="!processEntries(turn).length" class="ai-process-placeholder">
+                    正在理解请求…
+                  </p>
+                  <article
+                    v-for="entry in processEntries(turn)"
+                    :key="entry.id"
+                    class="ai-message"
+                    :class="`is-${entry.kind}`"
+                  >
+                    <div class="ai-message-meta">
+                      <span>{{ entryLabel(entry) }}</span
+                      ><span
+                        v-if="
+                          turn.status === 'running' &&
+                          entry.kind === 'assistant' &&
+                          entry.detail === 'streaming'
+                        "
+                        class="ai-streaming-dot"
+                        aria-label="正在生成"
+                      />
+                    </div>
+                    <p>{{ entry.text }}</p>
+                    <details
+                      v-if="entry.detail && entry.kind !== 'assistant'"
+                      class="ai-message-detail"
+                    >
+                      <summary>查看事件数据</summary>
+                      <pre>{{ JSON.stringify(entry.detail, null, 2) }}</pre>
+                    </details>
+                  </article>
+                </div>
               </details>
-            </article>
+              <article
+                v-if="turn.status === 'succeeded' || turn.status === 'cancelled'"
+                class="ai-message is-final"
+                aria-live="polite"
+              >
+                <div class="ai-message-meta">
+                  {{ turn.status === 'cancelled' ? '已取消' : '结果' }}
+                </div>
+                <div class="ai-markdown" v-html="renderAiMarkdown(turn.result || '处理完成')" />
+              </article>
+              <p
+                v-for="message in turnErrors(turn)"
+                :key="message"
+                class="ai-message is-error"
+                role="alert"
+              >
+                {{ message }}
+              </p>
+              <div v-if="turnResources(turn).length" class="ai-resource-refs">
+                <p v-for="resource in turnResources(turn)" :key="resource">{{ resource }}</p>
+              </div>
+              <div v-if="turnDownloads(turn).length" class="ai-result-downloads">
+                <a
+                  v-for="link in turnDownloads(turn)"
+                  :key="link"
+                  class="ai-download-link"
+                  :href="link"
+                  download
+                  >下载结果</a
+                >
+              </div>
+              <button
+                v-if="turn.canReconnect"
+                class="ai-reconnect-button"
+                type="button"
+                :disabled="assistant.closingSession.value"
+                @click="assistant.reconnect(turn.id)"
+              >
+                恢复连接
+              </button>
+            </section>
             <p v-if="assistant.error.value" class="ai-inline-error" role="alert">
               {{ assistant.error.value }}
             </p>
@@ -209,14 +365,19 @@ watch(
               v-model="assistant.input.value"
               rows="2"
               maxlength="4000"
-              :disabled="assistant.sending.value"
+              :disabled="assistant.sending.value || assistant.closingSession.value"
               placeholder="输入自然语言指令…"
               @keydown="onKeydown"
             />
             <button
               class="ai-send-button"
               type="submit"
-              :disabled="assistant.sending.value || !assistant.input.value.trim()"
+              :disabled="
+                assistant.sending.value ||
+                assistant.closingSession.value ||
+                !assistant.input.value.trim() ||
+                assistant.turns.value.some((turn) => turn.canReconnect)
+              "
               aria-label="发送消息"
               title="发送"
             >
@@ -382,6 +543,25 @@ watch(
   align-items: center;
   gap: 12px;
 }
+.ai-new-conversation,
+.ai-reconnect-button {
+  padding: 6px 9px;
+  border: 1px solid rgba(79, 216, 239, 0.45);
+  border-radius: 5px;
+  color: #c9f8ff;
+  background: rgba(23, 92, 111, 0.35);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.ai-new-conversation:disabled,
+.ai-reconnect-button:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+.ai-reconnect-button {
+  align-self: flex-start;
+}
 .ai-live-status {
   color: #72f0ca;
   font-size: 11px;
@@ -454,6 +634,126 @@ watch(
   background: rgba(18, 44, 70, 0.64);
   font-size: 12px;
   line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.ai-turn {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 auto;
+  min-width: 0;
+  gap: 9px;
+}
+.ai-turn-process {
+  min-width: 0;
+  border: 1px solid rgba(74, 132, 176, 0.3);
+  border-radius: 6px;
+  background: rgba(10, 28, 46, 0.6);
+}
+.ai-turn-process > summary {
+  padding: 8px 10px;
+  color: #91b4cd;
+  font-size: 11px;
+  cursor: pointer;
+}
+.ai-process-viewport {
+  box-sizing: border-box;
+  height: 160px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 0 10px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.ai-process-viewport .ai-message {
+  max-width: 100%;
+  flex: 0 0 auto;
+  padding: 7px 9px;
+  font-size: 11px;
+}
+.ai-process-placeholder {
+  margin: 8px 0;
+  color: #91b4cd;
+  font-size: 12px;
+}
+.ai-result-downloads {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.ai-resource-refs {
+  padding: 7px 10px;
+  color: #a8c8dd;
+  border-left: 2px solid rgba(79, 216, 239, 0.5);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.ai-resource-refs p {
+  margin: 3px 0;
+}
+.ai-markdown {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.ai-markdown > :first-child {
+  margin-top: 0;
+}
+.ai-markdown > :last-child {
+  margin-bottom: 0;
+}
+.ai-markdown p {
+  margin: 0.5em 0;
+  white-space: normal;
+}
+.ai-markdown h1,
+.ai-markdown h2,
+.ai-markdown h3,
+.ai-markdown h4 {
+  margin: 0.8em 0 0.4em;
+  font-size: 1.15em;
+  line-height: 1.4;
+  letter-spacing: normal;
+}
+.ai-markdown ul,
+.ai-markdown ol {
+  margin: 0.5em 0;
+  padding-left: 1.5em;
+}
+.ai-markdown blockquote {
+  margin: 0.6em 0;
+  padding-left: 10px;
+  border-left: 2px solid #4fd8ef;
+  color: #a8c8dd;
+}
+.ai-markdown pre {
+  max-width: 100%;
+  overflow-x: auto;
+  padding: 9px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.3);
+  white-space: pre;
+}
+.ai-markdown code {
+  font:
+    11px/1.5 ui-monospace,
+    Consolas,
+    monospace;
+}
+.ai-markdown table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+.ai-markdown th,
+.ai-markdown td {
+  padding: 5px 8px;
+  border: 1px solid rgba(74, 132, 176, 0.4);
+  white-space: nowrap;
+}
+.ai-markdown a {
+  color: #9eeaf5;
+  text-underline-offset: 2px;
 }
 .ai-message p {
   margin: 0;
@@ -612,6 +912,12 @@ watch(
   }
   .ai-message-list {
     padding: 12px;
+  }
+  .ai-process-viewport {
+    height: 120px;
+  }
+  .ai-dialog-actions {
+    gap: 7px;
   }
 }
 @media (max-width: 1599px) and (min-width: 1101px) {

@@ -24,6 +24,7 @@ var (
 type Registry struct {
 	tools    map[string]ToolSpec
 	executor Executor
+	retry    retryTiming
 }
 
 func NewRegistry(specs []ToolSpec, executor Executor) (*Registry, error) {
@@ -168,15 +169,38 @@ func (r *Registry) Invoke(ctx context.Context, call Call) Result {
 		result.Error = &ToolError{Code: "TOOL_EXECUTOR_UNAVAILABLE", Message: "tool executor is not configured", Retryable: true}
 		return result
 	}
-	callCtx := ctx
-	if timeout := timeoutFromPolicy(spec.TimeoutPolicy); timeout > 0 {
-		var cancel context.CancelFunc
-		callCtx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
-	}
-	result = r.executor.Execute(callCtx, call)
-	if callCtx.Err() != nil {
-		result = Result{SchemaVersion: schemaVersion, RequestID: call.RequestID, Tool: call.Tool, ToolVersion: call.ToolVersion, Status: "error", Error: &ToolError{Code: "TOOL_TIMEOUT", Message: "tool execution timed out", Retryable: true}}
+	safeRetry, _ := spec.RetryPolicy["safe"].(bool)
+	for attempt := 1; attempt <= maxRetryAttempts; attempt++ {
+		if ctx.Err() != nil {
+			result = cancelledToolResult(call)
+			break
+		}
+		callCtx, cancel := context.WithCancel(ctx)
+		timeout := timeoutFromPolicy(spec.TimeoutPolicy)
+		if timeout <= 0 && spec.Effect == "query" {
+			timeout = 45 * time.Second
+		}
+		if timeout > 0 {
+			cancel()
+			callCtx, cancel = context.WithTimeout(ctx, timeout)
+		}
+		result = r.executor.Execute(callCtx, call)
+		callErr := callCtx.Err()
+		cancel()
+		if ctx.Err() != nil {
+			result = cancelledToolResult(call)
+		} else if callErr != nil {
+			result = Result{SchemaVersion: schemaVersion, RequestID: call.RequestID, Tool: call.Tool, ToolVersion: call.ToolVersion, Status: "error", Error: &ToolError{Code: "TOOL_TIMEOUT", Message: "工具执行超时，请稍后重试。", Retryable: true}}
+		}
+		if attempt == maxRetryAttempts || spec.Effect != "query" || !safeRetry || result.Status != "error" || result.Error == nil || !result.Error.Retryable || ctx.Err() != nil {
+			break
+		}
+		delay := r.retry.delay(attempt)
+		observeRetry(ctx, "tool."+call.Tool, attempt+1, delay)
+		if err := r.retry.sleep(ctx, delay); err != nil {
+			result = cancelledToolResult(call)
+			break
+		}
 	}
 	// Domain executors are allowed to return typed Go slices/maps. Normalize
 	// them through JSON before applying the JSON-Schema contract so []string,
@@ -215,6 +239,10 @@ func (r *Registry) Invoke(ctx context.Context, call Call) Result {
 		}
 	}
 	return result
+}
+
+func cancelledToolResult(call Call) Result {
+	return Result{SchemaVersion: schemaVersion, RequestID: call.RequestID, Tool: call.Tool, ToolVersion: call.ToolVersion, Status: "error", Error: &ToolError{Code: "TOOL_CANCELLED", Message: "已停止工具执行。", Retryable: false}}
 }
 
 func timeoutFromPolicy(policy map[string]any) time.Duration {

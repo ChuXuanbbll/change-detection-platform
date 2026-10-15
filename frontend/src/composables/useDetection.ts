@@ -127,6 +127,7 @@ export function useDetection() {
     getSelected: () => { algorithm: string; model_id?: string; config_revision?: number; params: Record<string, number | string | boolean> } | undefined,
     area: AreaBounds | null,
     selection?: { region_id: string; scene_ids: string[]; aoi?: AreaPolygon },
+    isCurrent = () => true,
   ): Promise<void> {
     if (isSubmitting.value || inProgress.value) return;
     if (!area) {
@@ -155,6 +156,7 @@ export function useDetection() {
       batchAOI = frozenSelection?.aoi;
       const response = await fetchLocalImagery({ progress_id: progressId, bounds: [area.west, area.south, area.east, area.north], ...frozenSelection, model_id:selected.model_id, config_revision:selected.config_revision, params:selected.params });
       if (token !== generation) return;
+      if (!isCurrent()) { resetDetection(); return; }
       stopPreparationPolling();
       if (batchAOI && response.items.length && response.items.some(image => {
         try {
@@ -253,29 +255,37 @@ export function useDetection() {
     }, Math.min(15000, 1000 * 2 ** Math.min(pollFailures, 4)));
   }
 
-  async function waitTaskResult(taskId: string, token: number) {
+  async function waitTaskResult(taskId: string, token: number, isCurrent = () => true, signal?: AbortSignal) {
     let lastError: unknown;
-    for (let i = 0; i < 120 && token === generation; i++) {
-      try { return await getTaskResult(taskId); }
+    for (let i = 0; i < 120 && token === generation && isCurrent() && !signal?.aborted; i++) {
+      try { return await getTaskResult(taskId, signal); }
       catch (e: unknown) {
+        if (!isCurrent() || signal?.aborted) return;
         lastError = e;
         const ax = axios.isAxiosError(e) ? e : null;
         const code = (ax?.response?.data as { code?: string } | undefined)?.code;
         const status = ax?.response?.status;
         if (code !== 'RESULT_NOT_READY' && status !== 404 && status !== 425 &&
             !/result not ready|RESULT_NOT_READY|not ready/i.test(e instanceof Error ? e.message : '')) throw e;
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        await new Promise<void>((resolve) => {
+          const finish = () => { clearTimeout(timer); signal?.removeEventListener('abort', finish); resolve(); };
+          const timer = setTimeout(finish, 1000);
+          signal?.addEventListener('abort', finish, { once: true });
+          if (signal?.aborted) finish();
+        });
       }
     }
-    if (token !== generation) return;
+    if (token !== generation || !isCurrent() || signal?.aborted) return;
     throw lastError;
   }
 
   async function loadResultOverlay(taskId: string, token = generation,
-    bounds?: ResultOverlayPayload['resultBounds'], pair?: TimelinePair): Promise<ResultOverlayPayload | undefined> {
+    bounds?: ResultOverlayPayload['resultBounds'], pair?: TimelinePair,
+    isCurrent = () => true, signal?: AbortSignal): Promise<ResultOverlayPayload | undefined> {
+    if (!isCurrent()) return;
     try {
-      const result = await waitTaskResult(taskId, token);
-      if (!result || token !== generation) return;
+      const result = await waitTaskResult(taskId, token, isCurrent, signal);
+      if (!result || token !== generation || !isCurrent()) return;
       const payload: ResultOverlayPayload = { resultBounds: bounds, aoi: batchAOI };
       const warnings: string[] = [];
       if (result.stats_json) {
@@ -288,26 +298,26 @@ export function useDetection() {
       if (result.mask_path) {
         if (pair) pair.maskPath = result.mask_path;
         try {
-          const overlay = await getMaskOverlay(result.mask_path, 0.45, pair?.color);
+          const overlay = await getMaskOverlay(result.mask_path, 0.45, pair?.color, signal);
           payload.maskDataUrl = 'data:image/png;base64,' + overlay.png_b64;
           payload.maskBounds = overlay.bounds;
         } catch { warnings.push('变化掩膜加载失败'); }
       }
-      if (token !== generation) return;
+      if (token !== generation || !isCurrent()) return;
       if (result.geojson) payload.geojson = result.geojson;
       else {
         // Compatibility with older servers that only return file paths.
         try {
-          const blob = await downloadTaskResult(taskId, 'geojson');
+          const blob = await downloadTaskResult(taskId, 'geojson', signal);
           payload.geojson = JSON.parse(await blob.text()) as ChangePatchCollection;
         } catch { warnings.push('变化图斑数据加载失败'); }
       }
-      if (token !== generation) return;
+      if (token !== generation || !isCurrent()) return;
       if (pair) pair.warning = warnings.join('；');
       overlayMsg.value = pairs.value.map(pair => pair.warning).filter(Boolean).join('；') || warnings.join('；');
       return payload;
     } catch (e: unknown) {
-      if (token === generation) overlayMsg.value = e instanceof Error ? e.message : '加载结果失败';
+      if (token === generation && isCurrent()) overlayMsg.value = e instanceof Error ? e.message : '加载结果失败';
     }
   }
 

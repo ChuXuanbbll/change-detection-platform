@@ -50,7 +50,17 @@ type transcriptProvider struct {
 	requests []CompletionRequest
 }
 
+func gatewayTestIntentResponse() CompletionResponse {
+	return CompletionResponse{Message: ProviderMessage{Role: "assistant", Content: `{"operations":[{"skill_id":"imagery.explore.v1","slots":{"operation":"query"}}],"needs_clarification":false,"question":""}`}}
+}
+
 func (p *transcriptProvider) Complete(_ context.Context, request CompletionRequest) (CompletionResponse, error) {
+	if request.Stage == "skill_selection" {
+		return fixtureSkillSelection(request), nil
+	}
+	if request.Stage == "intent" {
+		return gatewayTestIntentResponse(), nil
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.calls++
@@ -67,7 +77,13 @@ func (p *transcriptProvider) Complete(_ context.Context, request CompletionReque
 
 type scriptedProvider struct{ calls int }
 
-func (p *scriptedProvider) Complete(context.Context, CompletionRequest) (CompletionResponse, error) {
+func (p *scriptedProvider) Complete(_ context.Context, request CompletionRequest) (CompletionResponse, error) {
+	if request.Stage == "skill_selection" {
+		return fixtureSkillSelection(request), nil
+	}
+	if request.Stage == "intent" {
+		return gatewayTestIntentResponse(), nil
+	}
 	p.calls++
 	return CompletionResponse{Message: ProviderMessage{Role: "assistant", Content: "已完成"}}, nil
 }
@@ -144,7 +160,13 @@ type waitingProvider struct {
 	release chan struct{}
 }
 
-func (p *waitingProvider) Complete(context.Context, CompletionRequest) (CompletionResponse, error) {
+func (p *waitingProvider) Complete(_ context.Context, request CompletionRequest) (CompletionResponse, error) {
+	if request.Stage == "skill_selection" {
+		return fixtureSkillSelection(request), nil
+	}
+	if request.Stage == "intent" {
+		return gatewayTestIntentResponse(), nil
+	}
 	select {
 	case <-p.started:
 	default:
