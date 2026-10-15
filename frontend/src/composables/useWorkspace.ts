@@ -2,7 +2,25 @@ import { computed, inject, provide, ref, watch, onUnmounted, type InjectionKey }
 import { settingsState, refreshSettings } from '../utils/settings';
 import { useDetection, type ResultOverlayPayload } from './useDetection';
 import type { AreaBounds, AreaPolygon } from '../utils/api';
-import { getRegionData, type RegionFeature, type RegionScenes, type ImageryPhase } from '../utils/regions';
+import {
+  getRegionData,
+  type RegionFeature,
+  type RegionScenes,
+  type ImageryPhase,
+} from '../utils/regions';
+
+export interface AiMapAdapter {
+  /** WGS84 wire order: [west, south, east, north]. */
+  flyToBounds(bounds: [number, number, number, number]): void;
+  selectRegion?(regionId: string): void;
+}
+let aiMapAdapter: AiMapAdapter | null = null;
+export function registerAiMapAdapter(adapter: AiMapAdapter | null): void {
+  aiMapAdapter = adapter;
+}
+export function getAiMapAdapter(): AiMapAdapter | null {
+  return aiMapAdapter;
+}
 
 function createWorkspace() {
   const detection = useDetection();
@@ -18,8 +36,14 @@ function createWorkspace() {
   const selectedRegion = ref<RegionFeature | null>(null);
   const catalogPhases = ref<ImageryPhase[]>([]);
   const loadedPhaseIds = ref<string[]>([]);
-  const imageryPhases = computed(() => catalogPhases.value.filter(phase => phase.available && loadedPhaseIds.value.includes(phase.id)));
-  const loadedScenes = computed(() => imageryPhases.value.flatMap(phase => phase.scenes.filter(scene => scene.available)));
+  const imageryPhases = computed(() =>
+    catalogPhases.value.filter(
+      (phase) => phase.available && loadedPhaseIds.value.includes(phase.id),
+    ),
+  );
+  const loadedScenes = computed(() =>
+    imageryPhases.value.flatMap((phase) => phase.scenes.filter((scene) => scene.available)),
+  );
   const activeMonth = ref('');
   const catalogLoading = ref(false);
   const catalogError = ref('');
@@ -30,14 +54,19 @@ function createWorkspace() {
   let indexReady: Promise<void> = Promise.resolve();
   function initializeCatalog(): Promise<void> {
     if (indexLoading.value) return indexReady;
-    indexLoading.value = true; indexError.value = '';
-    const request = new AbortController(); indexRequest = request;
+    indexLoading.value = true;
+    indexError.value = '';
+    const request = new AbortController();
+    indexRequest = request;
     indexReady = getRegionData<unknown>('/py/local/catalog?refresh=true', request.signal)
       .then(() => {})
-      .catch(error => {
-        if (!request.signal.aborted) indexError.value = error instanceof Error ? error.message : '影像目录初始化失败';
+      .catch((error) => {
+        if (!request.signal.aborted)
+          indexError.value = error instanceof Error ? error.message : '影像目录初始化失败';
       })
-      .finally(() => { indexLoading.value = false; });
+      .finally(() => {
+        indexLoading.value = false;
+      });
     return indexReady;
   }
   async function retryIndex() {
@@ -46,15 +75,23 @@ function createWorkspace() {
   }
   // App provides one workspace per document; SPA navigation reuses this promise.
   void initializeCatalog();
-  onUnmounted(() => { catalogRequest?.abort(); indexRequest?.abort(); });
-  const activePhase = computed(() => imageryPhases.value.find(phase => phase.month === activeMonth.value));
+  onUnmounted(() => {
+    catalogRequest?.abort();
+    indexRequest?.abort();
+  });
+  const activePhase = computed(() =>
+    imageryPhases.value.find((phase) => phase.month === activeMonth.value),
+  );
   async function selectWorkspaceRegion(region: RegionFeature | null) {
     if (detection.inProgress.value || selectedRegion.value?.id === region?.id) return;
     catalogRequest?.abort();
     selectedRegion.value = region;
     setSelectedArea(null);
-    loadedPhaseIds.value = []; activeMonth.value = ''; catalogPhases.value = [];
-    catalogError.value = ''; catalogLoading.value = false;
+    loadedPhaseIds.value = [];
+    activeMonth.value = '';
+    catalogPhases.value = [];
+    catalogError.value = '';
+    catalogLoading.value = false;
     detection.resetDetection();
     if (!region) return;
     await refreshCatalog(false);
@@ -63,29 +100,42 @@ function createWorkspace() {
     const region = selectedRegion.value;
     if (!region || detection.inProgress.value) return;
     catalogRequest?.abort();
-    const request = new AbortController(); catalogRequest = request;
+    const request = new AbortController();
+    catalogRequest = request;
     catalogLoading.value = true;
     catalogError.value = '';
     try {
       await indexReady;
       if (request.signal.aborted) return;
       if (indexError.value && !force) throw new Error(indexError.value);
-      const data = await getRegionData<RegionScenes>(`/py/local/regions/${encodeURIComponent(region.id)}/scenes${force ? '?refresh=true' : ''}`, request.signal);
+      const data = await getRegionData<RegionScenes>(
+        `/py/local/regions/${encodeURIComponent(region.id)}/scenes${force ? '?refresh=true' : ''}`,
+        request.signal,
+      );
       if (!request.signal.aborted && selectedRegion.value?.id === region.id) {
         indexError.value = '';
-        const previous = imageryPhases.value.map(phase => `${phase.id}:${phase.version}`).join('|');
+        const previous = imageryPhases.value
+          .map((phase) => `${phase.id}:${phase.version}`)
+          .join('|');
         catalogPhases.value = data.phases;
-        loadedPhaseIds.value = imageryPhases.value.map(phase => phase.id);
-        if (imageryPhases.value.map(phase => `${phase.id}:${phase.version}`).join('|') !== previous) detection.resetDetection();
-        if (!imageryPhases.value.some(phase => phase.month === activeMonth.value)) activeMonth.value = imageryPhases.value[0]?.month || '';
+        loadedPhaseIds.value = imageryPhases.value.map((phase) => phase.id);
+        if (
+          imageryPhases.value.map((phase) => `${phase.id}:${phase.version}`).join('|') !== previous
+        )
+          detection.resetDetection();
+        if (!imageryPhases.value.some((phase) => phase.month === activeMonth.value))
+          activeMonth.value = imageryPhases.value[0]?.month || '';
       }
     } catch (error) {
-      if (!request.signal.aborted) catalogError.value = error instanceof Error ? error.message : '影像列表加载失败';
-    } finally { if (catalogRequest === request) catalogLoading.value = false; }
+      if (!request.signal.aborted)
+        catalogError.value = error instanceof Error ? error.message : '影像列表加载失败';
+    } finally {
+      if (catalogRequest === request) catalogLoading.value = false;
+    }
   }
   function addPhase(phaseId: string) {
     if (detection.inProgress.value) return;
-    const phase = catalogPhases.value.find(item => item.id === phaseId);
+    const phase = catalogPhases.value.find((item) => item.id === phaseId);
     if (!phase?.available || phase.region_id !== selectedRegion.value?.id) return;
     if (!loadedPhaseIds.value.includes(phaseId)) {
       loadedPhaseIds.value = [...loadedPhaseIds.value, phaseId];
@@ -95,51 +145,104 @@ function createWorkspace() {
   }
   function removePhase(phaseId: string) {
     if (detection.inProgress.value) return;
-    loadedPhaseIds.value = loadedPhaseIds.value.filter(id => id !== phaseId);
+    loadedPhaseIds.value = loadedPhaseIds.value.filter((id) => id !== phaseId);
     detection.resetDetection();
-    if (!imageryPhases.value.some(phase => phase.month === activeMonth.value)) activeMonth.value = imageryPhases.value[0]?.month || '';
+    if (!imageryPhases.value.some((phase) => phase.month === activeMonth.value))
+      activeMonth.value = imageryPhases.value[0]?.month || '';
   }
   function closePhase(month: string) {
     if (detection.inProgress.value) return;
-    const phase = imageryPhases.value.find(item => item.month === month);
+    const phase = imageryPhases.value.find((item) => item.month === month);
     if (phase) removePhase(phase.id);
   }
   const selectedPairKey = ref('');
   const results = ref<ResultOverlayPayload[]>([]);
-  const selectedPair = computed(() => detection.pairs.value.find(pair => pair.key === selectedPairKey.value));
-  detection.onResult(result => { results.value.push(result); });
-  watch(() => detection.pairs.value, () => {
-    results.value = [];
-    selectedPairKey.value = '';
-  }, { flush: 'sync' });
-  watch(() => detection.pairs.value.map(pair => `${pair.key}:${pair.status}`).join('|'), () => {
-    if (!selectedPairKey.value) {
-      selectedPairKey.value = detection.pairs.value.find(pair => pair.status === 'succeeded')?.key || '';
-    }
+  const selectedPair = computed(() =>
+    detection.pairs.value.find((pair) => pair.key === selectedPairKey.value),
+  );
+  detection.onResult((result) => {
+    results.value.push(result);
   });
-  let observedSources = "";
+  watch(
+    () => detection.pairs.value,
+    () => {
+      results.value = [];
+      selectedPairKey.value = '';
+    },
+    { flush: 'sync' },
+  );
+  watch(
+    () => detection.pairs.value.map((pair) => `${pair.key}:${pair.status}`).join('|'),
+    () => {
+      if (!selectedPairKey.value) {
+        selectedPairKey.value =
+          detection.pairs.value.find((pair) => pair.status === 'succeeded')?.key || '';
+      }
+    },
+  );
+  let observedSources = '';
   let pendingRevision = false;
-  watch(() => JSON.stringify(settingsState.value?.settings.sources), sources => {
-    if (!sources) return;
-    if (observedSources && observedSources !== sources) pendingRevision = true;
-    observedSources = sources;
-    if (pendingRevision && !detection.inProgress.value) void updateConfiguration();
+  watch(
+    () => JSON.stringify(settingsState.value?.settings.sources),
+    (sources) => {
+      if (!sources) return;
+      if (observedSources && observedSources !== sources) pendingRevision = true;
+      observedSources = sources;
+      if (pendingRevision && !detection.inProgress.value) void updateConfiguration();
+    },
+  );
+  watch(detection.inProgress, (running) => {
+    if (!running && pendingRevision) void updateConfiguration();
   });
-  watch(detection.inProgress, running => { if (!running && pendingRevision) void updateConfiguration(); });
   async function updateConfiguration() {
     pendingRevision = false;
-    setSelectedArea(null); loadedPhaseIds.value = []; activeMonth.value = '';
+    setSelectedArea(null);
+    loadedPhaseIds.value = [];
+    activeMonth.value = '';
     await retryIndex();
   }
-  const refreshOnFocus = () => { void refreshSettings().catch(() => {}); };
-  const warnOnClose = (event: BeforeUnloadEvent) => { if (detection.inProgress.value) { event.preventDefault(); event.returnValue = ''; } };
+  const refreshOnFocus = () => {
+    void refreshSettings().catch(() => {});
+  };
+  const warnOnClose = (event: BeforeUnloadEvent) => {
+    if (detection.inProgress.value) {
+      event.preventDefault();
+      event.returnValue = '';
+    }
+  };
   window.addEventListener('focus', refreshOnFocus);
   window.addEventListener('beforeunload', warnOnClose);
-  onUnmounted(() => { window.removeEventListener('focus', refreshOnFocus); window.removeEventListener('beforeunload', warnOnClose); });
-  return { ...detection, selectedArea, selectedGeometry, selectionEditing, setSelectedArea, selectedPairKey, selectedPair, results,
-    selectedRegion, catalogPhases, loadedPhaseIds, loadedScenes, activeMonth, imageryPhases, activePhase,
-    indexLoading, indexError, retryIndex,
-    catalogLoading, catalogError, selectWorkspaceRegion, refreshCatalog, addPhase, removePhase, closePhase };
+  onUnmounted(() => {
+    window.removeEventListener('focus', refreshOnFocus);
+    window.removeEventListener('beforeunload', warnOnClose);
+  });
+  return {
+    ...detection,
+    selectedArea,
+    selectedGeometry,
+    selectionEditing,
+    setSelectedArea,
+    selectedPairKey,
+    selectedPair,
+    results,
+    selectedRegion,
+    catalogPhases,
+    loadedPhaseIds,
+    loadedScenes,
+    activeMonth,
+    imageryPhases,
+    activePhase,
+    indexLoading,
+    indexError,
+    retryIndex,
+    catalogLoading,
+    catalogError,
+    selectWorkspaceRegion,
+    refreshCatalog,
+    addPhase,
+    removePhase,
+    closePhase,
+  };
 }
 
 type Workspace = ReturnType<typeof createWorkspace>;

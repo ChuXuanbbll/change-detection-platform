@@ -1,6 +1,7 @@
 package api
 
 import (
+	"cdp/backend-go/internal/ai"
 	"net/http"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 // Deps 注入依赖
 type Deps struct {
 	preparations preparationRegistry
+	AI           *ai.Gateway
 	Management   *Management
 	DB           *store.DB
 	Py           *client.PyClient
@@ -47,6 +49,9 @@ func RegisterRoutes(r *gin.Engine, d *Deps) {
 
 	// 业务 API
 	api := r.Group("/api")
+	if d.AI != nil {
+		d.AI.Register(api)
+	}
 	if d.Management != nil {
 		d.Management.register(api)
 	}
@@ -60,6 +65,7 @@ func RegisterRoutes(r *gin.Engine, d *Deps) {
 			imgs.POST("/local", LocalFetchHandler(d))
 			imgs.GET("/local/progress/:id", LocalProgressHandler(d))
 			imgs.GET("", ListImagesHandler(d))
+			imgs.GET("/:id", GetImageHandler(d))
 			imgs.GET("/:id/preview", ImagePreviewHandler(d))
 			imgs.DELETE("/:id", DeleteImageHandler(d))
 		}

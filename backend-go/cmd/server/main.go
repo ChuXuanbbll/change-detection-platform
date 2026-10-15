@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"cdp/backend-go/internal/ai"
 	"cdp/backend-go/internal/api"
 	"cdp/backend-go/internal/client"
 	"cdp/backend-go/internal/model"
@@ -156,6 +157,16 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	aiDomain, err := api.NewAIDomain(deps)
+	if err != nil {
+		log.Fatalf("[ai] 初始化工具域失败: %v", err)
+	}
+	aiGateway, err := ai.NewGateway(cfg.DataDir, aiDomain.Specs(), aiDomain)
+	if err != nil {
+		log.Fatalf("[ai] 初始化网关失败: %v", err)
+	}
+	defer aiGateway.Close()
+	deps.AI = aiGateway
 	api.RegisterRoutes(r, deps)
 	go func() {
 		for attempt := 0; attempt < 10; attempt++ {
