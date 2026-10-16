@@ -78,6 +78,18 @@ body {
   background: #04080f;
 }
 
+/* 仅 AI 对话框内允许选中文字，包括 Teleport 到 body 的内容。 */
+* {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+#ai-assistant-dialog,
+#ai-assistant-dialog * {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
 @layer components {
   /* ── 应用骨架 ── */
   .app-shell {
