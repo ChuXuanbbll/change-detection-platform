@@ -33,9 +33,10 @@ func uiInputSchema() map[string]any {
 func uiInputSchemaForAction(action string) map[string]any {
 	base := uiInputSchema()
 	properties := base["properties"].(map[string]any)
+	properties["admin_code"] = map[string]any{"type": "string", "pattern": "^[0-9]{6}$"}
 	allowed := map[string][]string{
 		"submit_detection": {"expected_revision"},
-		"select_region":    {"region_id", "expected_revision"},
+		"select_region":    {"region_id", "admin_code", "expected_revision"},
 		"load_phase":       {"phase_id", "phase_ids", "scene_ids", "expected_revision"},
 		"load_phases":      {"phase_id", "phase_ids", "scene_ids", "expected_revision"},
 		"set_existing_aoi": {"aoi", "source", "bounds", "expected_revision"},
@@ -81,6 +82,23 @@ func (g *Gateway) handleUICommand(ctx context.Context, session *Session, workflo
 	if err := validateUIArgs(action, args); err != nil {
 		return err
 	}
+	if action == "select_region" && stringValue(args["admin_code"]) != "" {
+		found := false
+		for _, prior := range workflow.ToolCalls {
+			if prior.OperationIndex != workflow.OperationIndex || prior.Tool != "region.search" || prior.Status != "ok" {
+				continue
+			}
+			for _, row := range dataRows(prior.Data, "matches") {
+				m := mapValue(row)
+				if stringValue(m["admin_code"]) == stringValue(args["admin_code"]) && stringValue(m["region_id"]) == stringValue(args["region_id"]) {
+					found = true
+				}
+			}
+		}
+		if !found {
+			return fmt.Errorf("county must be resolved by region.search before selection")
+		}
+	}
 	if action == "submit_detection" {
 		if workflow.Intent == nil || workflow.OperationIndex >= len(workflow.Intent.Operations) {
 			return fmt.Errorf("detection requires a normalized operation")
@@ -89,15 +107,19 @@ func (g *Gateway) handleUICommand(ctx context.Context, session *Session, workflo
 		if op.SkillID != "change.detect.v1" || stringValue(op.Slots["operation"]) != "detect" {
 			return fmt.Errorf("detection is not requested")
 		}
+		var county map[string]any
 		if len(dataStrings(op.Slots, "admin_path")) > 0 {
 			resolved := false
 			for _, prior := range workflow.ToolCalls {
-				if prior.OperationIndex != workflow.OperationIndex || prior.Tool != "region.search" || prior.Status != "ok" || !sameJSON(normalizeJSONValue(prior.Input["admin_path"]), normalizeJSONValue(op.Slots["admin_path"])) {
+				if prior.OperationIndex != workflow.OperationIndex || prior.Tool != "region.search" || prior.Status != "ok" || !sameJSON(normalizeJSONValue(prior.Input["admin_path"]), normalizeJSONValue(op.Slots["admin_path"])) || len(dataRows(prior.Data, "matches")) != 1 {
 					continue
 				}
 				for _, row := range dataRows(prior.Data, "matches") {
 					if stringValue(mapValue(row)["region_id"]) == stringValue(session.Workspace["region_id"]) {
 						resolved = true
+						if stringValue(mapValue(row)["admin_code"]) != "" && stringValue(mapValue(row)["level"]) == "county" && stringValue(mapValue(row)["boundary_version"]) != "" {
+							county = mapValue(row)
+						}
 					}
 				}
 			}
@@ -110,6 +132,17 @@ func (g *Gateway) handleUICommand(ctx context.Context, session *Session, workflo
 			if value, ok := op.Slots[key]; ok {
 				args[key] = value
 			}
+		}
+		useBoundary, _ := op.Slots["use_admin_boundary"].(bool)
+		if useBoundary && county == nil {
+			return fmt.Errorf("resolve one county boundary before detection")
+		}
+		if useBoundary && county != nil {
+			args["admin_code"] = county["admin_code"]
+			args["admin_version"] = county["boundary_version"]
+			args["region_id"] = county["region_id"]
+			// Resolve geometry in the shared service; never reconstruct a county.
+			delete(args, "aoi")
 		}
 	}
 	actionID := uuid.NewString()
@@ -210,7 +243,7 @@ func latestOperationAction(session *Session, workflow *Workflow, action string) 
 func validateUIArgs(action string, args map[string]any) error {
 	allowed := map[string]map[string]bool{
 		"submit_detection": {"expected_revision": true},
-		"select_region":    {"region_id": true, "expected_revision": true},
+		"select_region":    {"region_id": true, "admin_code": true, "expected_revision": true},
 		"load_phase":       {"phase_id": true, "phase_ids": true, "scene_ids": true, "expected_revision": true},
 		"load_phases":      {"phase_id": true, "phase_ids": true, "scene_ids": true, "expected_revision": true},
 		"set_existing_aoi": {"aoi": true, "source": true, "bounds": true, "expected_revision": true},

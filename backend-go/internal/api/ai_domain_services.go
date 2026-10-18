@@ -86,6 +86,24 @@ func LocalFetchService(ctx context.Context, d *Deps, req localFetchReq) (out Loc
 	if e := validateBounds(req.Bounds); e != nil {
 		return out, serviceErr(400, "BOUNDS_INVALID", e.Error())
 	}
+	if req.AdminCode != "" {
+		if d.DB == nil || len(selected) == 0 {
+			return out, serviceErr(400, "ADMIN_BOUNDARY_INVALID", "县界检测需要当前来源及已选影像")
+		}
+		feature, e := d.DB.AdministrativeRegion(req.AdminCode, req.AdminVersion)
+		if e != nil || feature.Properties.Level != "county" || feature.Properties.SourceID != req.RegionID {
+			return out, serviceErr(400, "ADMIN_BOUNDARY_INVALID", "县级行政区或边界版本与当前影像来源不匹配")
+		}
+		if len(req.AOI) > 0 && string(req.AOI) != "null" {
+			var supplied, known any
+			if json.Unmarshal(req.AOI, &supplied) != nil || json.Unmarshal(feature.Geometry, &known) != nil || !reflect.DeepEqual(supplied, known) {
+				return out, serviceErr(400, "ADMIN_BOUNDARY_MISMATCH", "检测轮廓与入库县级边界不一致")
+			}
+		}
+		req.AOI = feature.Geometry
+		req.AdminVersion = feature.Properties.Version
+		req.Bounds = feature.Properties.Bounds
+	}
 	if req.MaxImages < 0 || req.MaxImages > maxWaybackImages {
 		return out, serviceErr(400, "INVALID_LIMIT", "max_images 必须为 0~20，省略或 0 表示全部时相")
 	}
@@ -131,7 +149,7 @@ func LocalFetchService(ctx context.Context, d *Deps, req localFetchReq) (out Loc
 		stop = progress.Watch(outputDir, func(s progress.Snapshot) { d.preparations.update(req.ProgressID, s) })
 		defer stop()
 	}
-	response, e := d.Py.LocalFetch(ctx, &model.LocalFetchReq{AOI: req.AOI, Bounds: req.Bounds, StartDate: req.StartDate, EndDate: req.EndDate, MaxImages: req.MaxImages, Zoom: req.Zoom, Buffer: req.Buffer, OutputDir: outputDir, RegionID: req.RegionID, SceneIDs: selected})
+	response, e := d.Py.LocalFetch(ctx, &model.LocalFetchReq{AdminCode: req.AdminCode, AdminVersion: req.AdminVersion, AOI: req.AOI, Bounds: req.Bounds, StartDate: req.StartDate, EndDate: req.EndDate, MaxImages: req.MaxImages, Zoom: req.Zoom, Buffer: req.Buffer, OutputDir: outputDir, RegionID: req.RegionID, SceneIDs: selected})
 	if e != nil {
 		status := 502
 		var up *client.UpstreamError
@@ -166,6 +184,10 @@ func LocalFetchService(ctx context.Context, d *Deps, req localFetchReq) (out Loc
 			precision = "month"
 		}
 		meta := map[string]any{"batch_id": out.BatchID, "source_file": it.SourceFile, "date_precision": precision, "region_id": req.RegionID, "bounds": it.Bounds}
+		if req.AdminCode != "" {
+			meta["admin_code"] = req.AdminCode
+			meta["admin_version"] = req.AdminVersion
+		}
 		if len(req.AOI) > 0 && string(req.AOI) != "null" {
 			meta["aoi"] = req.AOI
 		}

@@ -29,7 +29,7 @@ function load(relativePath, api = {}) {
   }).outputText;
   const exports = {};
   const sandbox = {
-    exports, console, Error, Blob, crypto: globalThis.crypto,
+    exports, console, Error, Blob, AbortController, crypto: globalThis.crypto,
     window: { addEventListener() {}, removeEventListener() {} },
     ResizeObserver: class { observe() {} disconnect() {} },
     require: name => {
@@ -131,6 +131,36 @@ test('polygon detection stops when an older crop server drops its AOI', async ()
   assert.equal(tasks, 0);
   assert.equal(state.inProgress.value, false);
   assert.match(state.taskError.value, /未确认多边形范围/);
+});
+
+test('trusted county geometry, holes and version survive asynchronous preparation and result overlays', async () => {
+  let captured;
+  const request=deferred();
+  const selection=vue.reactive({region_id:'xiongan',admin_code:'130629',admin_version:'frozen-v1',scene_ids:['a','b'],
+    aoi:{type:'MultiPolygon',coordinates:[[[[114,38],[115,38],[115,39],[114,39],[114,38]],[[114.2,38.2],[114.4,38.2],[114.2,38.4],[114.2,38.2]]],[[[115.1,38],[115.2,38],[115.1,38.1],[115.1,38]]]]}});
+  const original=JSON.stringify(selection.aoi);
+  const {state}=detection({fetchLocalImagery:payload=>{captured=payload;return request.promise;}});
+  const submitting=state.submitTask(parameters,area,selection);
+  selection.admin_version='changed';
+  selection.aoi.coordinates[1][0][0][0]=116;
+  assert.equal(captured.admin_version,'frozen-v1');
+  assert.equal(JSON.stringify(captured.aoi),original);
+  request.resolve({items:fourImages().map(image=>({...image,meta_json:JSON.stringify({region_id:captured.region_id,admin_code:captured.admin_code,admin_version:captured.admin_version,aoi:captured.aoi})})),count:4});
+  await submitting;
+  assert.equal(state.pairs.value.length,3);
+  assert.equal(state.taskError.value,'');
+  const overlay=await state.loadResultOverlay('task-1');
+  assert.equal(JSON.stringify(overlay.aoi),original);
+});
+
+test('county preparation refuses a crop from another boundary version before creating tasks', async () => {
+  let tasks=0;
+  const aoi={type:'MultiPolygon',coordinates:[[[[114,38],[115,38],[114,39],[114,38]]]]};
+  const {state}=detection({fetchLocalImagery:async()=>({items:fourImages().map(image=>({...image,meta_json:JSON.stringify({region_id:'xiongan',admin_code:'130629',admin_version:'old-v0',aoi})}))}),
+    createTask:async()=>{tasks++;return {id:'wrong-version'};}});
+  await state.submitTask(parameters,area,{region_id:'xiongan',admin_code:'130629',admin_version:'frozen-v1',scene_ids:['a','b'],aoi});
+  assert.equal(tasks,0);
+  assert.match(state.taskError.value,/未确认多边形范围/);
 });
 
 test('result parsing accepts optional histograms and rejects inconsistent sample counts', () => {

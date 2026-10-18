@@ -7,7 +7,7 @@
 | 能力 | 当前行为 | 主要依据 |
 |---|---|---|
 | 四页工作区 | 概览、对比、报告、管理；KeepAlive 与应用级共享工作区 | `frontend/src/router/index.ts`、`composables/useWorkspace.ts` |
-| 行政区与月时相 | 14 个展示区域；选择区域后添加月时相，同区域同月份合成 | `fetchers/regions.py`、`fetchers/local.py` |
+| 行政区与月时相 | 14 个影像来源；全省显示 14 个来源区域，来源内显示县区；共享知识库保留 11 市、167 县，支持可信完整县界检测（2026-10-16 更新） | [行政区知识库](administrative-boundaries.md)、`fetchers/regions.py`、`fetchers/local.py` |
 | 检测选区 | 矩形、无孔单环 Polygon，顶点/边编辑；服务端几何与行政区覆盖校验 | `MapBasemap.vue`、`utils/selectionGeometry.ts` |
 | 版本化管理 | 模型、多来源、检测/性能配置、历史与回退；Go/Python 同版本后允许新批次 | `internal/api/management.go`、`app/settings.py` |
 | 模型执行 | 平台只有 `hebei_onnx` 适配器；已验证且启用的兼容 ONNX，CUDA 子进程执行 | `algorithms/hebei_onnx.py`、`utils/model_process.py` |

@@ -5,6 +5,14 @@ export interface RegionFeature {
   type: 'Feature'; id: string; geometry: ProvinceGeometry;
   properties: { region_id: string; name: string; label: [number, number]; kind: string };
 }
+export interface AdministrativeFeature {
+  type: 'Feature'; id: string; geometry: GeoJSON.Polygon | GeoJSON.MultiPolygon;
+  properties: {
+    admin_code: string; name: string; level: 'province' | 'prefecture' | 'county';
+    parent_code: string; admin_path: string[]; source_id: string; boundary_version: string; data_date: string;
+    label: [number, number]; bounds: [number, number, number, number];
+  };
+}
 export interface RegionCollection {
   type: 'FeatureCollection'; features: RegionFeature[];
   boundary: ProvinceGeometry; bounds: [number, number, number, number];
@@ -26,6 +34,7 @@ export interface ImageryScene {
 }
 export interface RegionScenes { region_id: string; name: string; scenes: ImageryScene[]; phases: ImageryPhase[] }
 export interface ImageryPhase {
+  matching_scene_count?: number;
   id: string; region_id: string; month: string; scenes: ImageryScene[];
   version: string; available: boolean; bounds: [number, number, number, number] | null;
 }
@@ -33,7 +42,7 @@ export async function getRegionData<T>(url: string, signal?: AbortSignal): Promi
   const response = await fetch(url, { signal, cache: 'no-store' });
   if (!response.ok) {
     const data = await response.json().catch(() => null);
-    throw new Error(typeof data?.detail === 'string' ? data.detail : '行政区数据加载失败');
+    throw new Error(typeof data?.detail === 'string' ? data.detail : typeof data?.error === 'string' ? data.error : '行政区数据加载失败');
   }
   return response.json();
 }

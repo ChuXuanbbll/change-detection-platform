@@ -153,6 +153,9 @@ func main() {
 		},
 		UploadMaxMB: cfg.UploadMaxMB,
 	}
+	if err := api.LoadAdministrativeRegions(deps); err != nil {
+		log.Fatalf("[administrative] 加载行政区边界失败: %v", err)
+	}
 	management, err := api.NewManagement(deps)
 	if err != nil {
 		log.Fatal(err)

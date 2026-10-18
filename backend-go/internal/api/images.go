@@ -21,19 +21,21 @@ const maxWaybackImages = 20
 
 // localFetchReq POST /api/images/local 入参
 type localFetchReq struct {
-	AOI        json.RawMessage `json:"aoi,omitempty"`
-	ProgressID string          `json:"progress_id"`
-	ModelID    string          `json:"model_id"`
-	Revision   int64           `json:"config_revision"`
-	Params     map[string]any  `json:"params"`
-	Bounds     [4]float64      `json:"bounds" binding:"required"`
-	StartDate  string          `json:"start_date"`
-	EndDate    string          `json:"end_date"`
-	MaxImages  int             `json:"max_images"`
-	Zoom       int             `json:"zoom"`
-	Buffer     int             `json:"buffer"`
-	RegionID   string          `json:"region_id"`
-	SceneIDs   json.RawMessage `json:"scene_ids"`
+	AdminCode    string          `json:"admin_code,omitempty"`
+	AdminVersion string          `json:"admin_version,omitempty"`
+	AOI          json.RawMessage `json:"aoi,omitempty"`
+	ProgressID   string          `json:"progress_id"`
+	ModelID      string          `json:"model_id"`
+	Revision     int64           `json:"config_revision"`
+	Params       map[string]any  `json:"params"`
+	Bounds       [4]float64      `json:"bounds" binding:"required"`
+	StartDate    string          `json:"start_date"`
+	EndDate      string          `json:"end_date"`
+	MaxImages    int             `json:"max_images"`
+	Zoom         int             `json:"zoom"`
+	Buffer       int             `json:"buffer"`
+	RegionID     string          `json:"region_id"`
+	SceneIDs     json.RawMessage `json:"scene_ids"`
 }
 
 // safeUnderDataRoot 检查 child 是否在 dataDir 之下（防止 ../ 路径逃逸）。

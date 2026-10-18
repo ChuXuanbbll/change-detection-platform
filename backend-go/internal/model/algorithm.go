@@ -27,16 +27,18 @@ type LocalImageItem struct {
 
 // LocalFetchReq 本地裁切请求体（透传到 Python）
 type LocalFetchReq struct {
-	AOI       json.RawMessage `json:"aoi,omitempty"`
-	Bounds    [4]float64      `json:"bounds"`
-	StartDate string          `json:"start_date"`
-	EndDate   string          `json:"end_date"`
-	MaxImages int             `json:"max_images"`
-	Zoom      int             `json:"zoom"`
-	Buffer    int             `json:"buffer"`
-	OutputDir string          `json:"output_dir"`
-	RegionID  string          `json:"region_id,omitempty"`
-	SceneIDs  []string        `json:"scene_ids,omitempty"`
+	AdminCode    string          `json:"admin_code,omitempty"`
+	AdminVersion string          `json:"admin_version,omitempty"`
+	AOI          json.RawMessage `json:"aoi,omitempty"`
+	Bounds       [4]float64      `json:"bounds"`
+	StartDate    string          `json:"start_date"`
+	EndDate      string          `json:"end_date"`
+	MaxImages    int             `json:"max_images"`
+	Zoom         int             `json:"zoom"`
+	Buffer       int             `json:"buffer"`
+	OutputDir    string          `json:"output_dir"`
+	RegionID     string          `json:"region_id,omitempty"`
+	SceneIDs     []string        `json:"scene_ids,omitempty"`
 }
 
 // LocalFetchResp Python 返回

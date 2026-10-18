@@ -26,7 +26,7 @@ from PIL import Image
 PROJECT = Path(__file__).resolve().parents[3]
 DATA = Path(os.getenv('ASSET_DIR', str(PROJECT / 'data')))
 IMAGERY = Path(os.environ.get('LOCAL_IMAGERY_DIR', 'Y:/河北影像/2025年'))
-BOUNDARY = Path(os.environ.get('HEBEI_BOUNDARY_FILE', str(DATA / 'boundaries/hebei.geojson')))
+BOUNDARY = Path(os.environ.get('HEBEI_BOUNDARY_FILE', str(DATA / 'boundaries/hebei-administrative-province.geojson')))
 # Navigation envelope only, never represented as an administrative polygon.
 HEBEI_BOUNDS = (113.45, 36.0, 119.9, 42.65)
 MOSAIC_RULE_VERSION = 'directory-month-fine-first-v2'
@@ -104,7 +104,7 @@ def province():
             raise ValueError('省界必须是河北范围内有效的 WGS84 Polygon/MultiPolygon')
         return region
     except (OSError, ValueError, KeyError, TypeError, GEOSException) as exc:
-        raise BoundaryUnavailable('河北省界文件缺失或无效，请恢复 data/boundaries/hebei.geojson 后重启服务') from exc
+        raise BoundaryUnavailable('河北省界文件缺失或无效，请恢复 data/boundaries/hebei-administrative-province.geojson 后重启服务') from exc
 
 
 @lru_cache(maxsize=1)
@@ -202,7 +202,13 @@ def _clear_catalog():
 catalog.cache_clear = _clear_catalog
 
 
-def selection(bounds, aoi=None, region_id=None):
+def selection(bounds, aoi=None, region_id=None, admin_code=None, admin_version=None):
+    if admin_code:
+        from app.fetchers.administrative import boundary_geometry
+        geom = boundary_geometry(admin_code, admin_version, region_id)
+        if aoi is not None and not geom.equals_exact(shape(aoi), 0):
+            raise ValueError('检测轮廓与入库县级边界不一致')
+        return geom
     if aoi is not None:
         if not region_id:
             raise ValueError('多边形选区必须指定当前行政区 region_id')
@@ -246,12 +252,14 @@ def selection(bounds, aoi=None, region_id=None):
     return geom
 
 
-def crop_images(bounds, start, end, limit, output_dir, region_id=None, scene_ids=None, aoi=None):
+def crop_images(bounds, start, end, limit, output_dir, region_id=None, scene_ids=None, aoi=None, admin_code=None, admin_version=None):
     from app.utils.progress import Progress
     progress = Progress(output_dir)
     progress("preparing", 0)
     if scene_ids is not None:
-        return crop_mosaics(bounds, start, end, limit, output_dir, region_id, scene_ids, aoi)
+        return crop_mosaics(bounds, start, end, limit, output_dir, region_id, scene_ids, aoi, admin_code, admin_version)
+    if admin_code:
+        raise ValueError('县界检测必须指定当前来源及已选影像')
     start, end = date.fromisoformat(start), date.fromisoformat(end)
     if start > end:
         raise ValueError('起始日期不能晚于结束日期')
@@ -491,17 +499,19 @@ def _mosaic_grid(aoi, sources):
     return contributing, overlap, width, height
 
 
-def selection_pixels(bounds, region_id, scene_ids, aoi=None):
+def selection_pixels(bounds, region_id, scene_ids, aoi=None, admin_code=None, admin_version=None):
     from app.fetchers.regions import region_geometry
     sources = selected_scenes(region_id, scene_ids, single_month=True)
-    aoi = selection(bounds, aoi, region_id).intersection(region_geometry(region_id))
+    aoi = selection(bounds, aoi, region_id, admin_code, admin_version)
+    if not admin_code:
+        aoi = aoi.intersection(region_geometry(region_id))
     if aoi.is_empty or aoi.area <= 0:
         raise ValueError('选区不在当前行政区内')
     _, _, width, height = _mosaic_grid(aoi, sources)
     return dict(width=width, height=height, pixels=width * height)
 
 
-def crop_mosaics(bounds, start, end, limit, output_dir, region_id, scene_ids, aoi=None):
+def crop_mosaics(bounds, start, end, limit, output_dir, region_id, scene_ids, aoi=None, admin_code=None, admin_version=None):
     from app.utils.progress import Progress
     progress = Progress(output_dir)
     progress("preparing", 0)
@@ -510,7 +520,9 @@ def crop_mosaics(bounds, start, end, limit, output_dir, region_id, scene_ids, ao
         raise ValueError('起始日期不能晚于结束日期')
     rows = selected_scenes(region_id, scene_ids)
     from app.fetchers.regions import region_geometry
-    aoi = selection(bounds, aoi, region_id).intersection(region_geometry(region_id))
+    aoi = selection(bounds, aoi, region_id, admin_code, admin_version)
+    if not admin_code:
+        aoi = aoi.intersection(region_geometry(region_id))
     if aoi.is_empty or aoi.area <= 0:
         raise ValueError('选区不在当前行政区内')
     phases = {}

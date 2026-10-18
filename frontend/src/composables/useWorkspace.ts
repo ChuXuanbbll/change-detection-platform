@@ -1,11 +1,12 @@
 import { computed, inject, provide, reactive, ref, watch, onUnmounted, type InjectionKey } from 'vue';
 import { models, settingsState, refreshSettings } from '../utils/settings';
 import { useDetection, type ResultOverlayPayload } from './useDetection';
-import type { AreaBounds, AreaPolygon } from '../utils/api';
+import type { AreaBounds, AreaPolygon, AreaGeometry } from '../utils/api';
 import { polygonFromPoints, rectangleEditPoints } from '../utils/selectionGeometry';
 import {
   getRegionData,
   type RegionFeature,
+  type AdministrativeFeature,
   type RegionScenes,
   type ImageryPhase,
 } from '../utils/regions';
@@ -24,6 +25,8 @@ export function getAiMapAdapter(): AiMapAdapter | null {
 }
 
 export interface DetectionRequest {
+  admin_code?: string;
+  admin_version?: string;
   region_id?: string;
   phase_dates?: string[];
   phase_ids?: string[];
@@ -71,18 +74,26 @@ function createWorkspace() {
     };
   }
   const selectedArea = ref<AreaBounds | null>(null);
+  const selectedAdministrative = ref<AdministrativeFeature | null>(null);
+  const administrativeBoundary = ref<AdministrativeFeature | null>(null);
+  let boundaryRequest: AbortController | null = null;
+  let boundaryGeneration = 0;
   const selectedGeometry = ref<AreaPolygon | null>(null);
   const selectionEditing = ref(false);
   function setSelectedArea(bounds: AreaBounds | null, geometry: AreaPolygon | null = null) {
     if (detection.inProgress.value) return;
+    boundaryGeneration++;
+    boundaryRequest?.abort();
     detection.resetDetection();
+    administrativeBoundary.value = null;
     selectedArea.value = bounds;
     selectedGeometry.value = bounds && geometry ? JSON.parse(JSON.stringify(geometry)) : null;
   }
   const selectedRegion = ref<RegionFeature | null>(null);
   // A null editor geometry denotes a rectangle, not an absent selection.
   // Preserve its administrative intersection when passing it to detection/AI.
-  const detectionAoi = computed<AreaPolygon | null>(() => {
+  const detectionAoi = computed<AreaGeometry | null>(() => {
+    if (administrativeBoundary.value) return administrativeBoundary.value.geometry;
     if (!selectedArea.value) return null;
     if (selectedGeometry.value) return selectedGeometry.value;
     if (!selectedRegion.value) return null;
@@ -96,6 +107,35 @@ function createWorkspace() {
     return '';
   });
   const catalogPhases = ref<ImageryPhase[]>([]);
+  async function selectAdministrativeRegion(feature: AdministrativeFeature | null) {
+    if (detection.inProgress.value) return;
+    if (feature && feature.properties.source_id !== selectedRegion.value?.id) return;
+    if (feature?.id !== selectedAdministrative.value?.id) {
+      boundaryGeneration++;
+      boundaryRequest?.abort();
+    }
+    selectedAdministrative.value = feature;
+  }
+
+  async function useAdministrativeBoundary(code = selectedAdministrative.value?.id, version?: string, isCurrent = () => true) {
+    if (!code || detection.inProgress.value) return;
+    const generation = ++boundaryGeneration;
+    const sourceID = selectedRegion.value?.id;
+    const boundaryVersion = version ?? (selectedAdministrative.value?.id === code ? selectedAdministrative.value.properties.boundary_version : undefined);
+    boundaryRequest?.abort();
+    const request = new AbortController();
+    boundaryRequest = request;
+    try {
+      const feature = await getRegionData<AdministrativeFeature>(`/api/administrative-regions/${encodeURIComponent(code)}${boundaryVersion ? `?version=${encodeURIComponent(boundaryVersion)}` : ''}`, request.signal);
+      if (!isCurrent() || generation !== boundaryGeneration || request.signal.aborted || detection.inProgress.value || sourceID !== selectedRegion.value?.id) throw new Error('工作区已变化，请重新选择县界');
+      if (feature.properties.level !== 'county' || feature.properties.source_id !== sourceID) throw new Error('县区与当前影像来源不匹配');
+      const [west,south,east,north] = feature.properties.bounds;
+      setSelectedArea({west,south,east,north});
+      administrativeBoundary.value = feature;
+    } finally {
+      if (boundaryRequest === request) boundaryRequest = null;
+    }
+  }
   const loadedPhaseIds = ref<string[]>([]);
   const imageryPhases = computed(() =>
     catalogPhases.value.filter(
@@ -137,6 +177,7 @@ function createWorkspace() {
   // App provides one workspace per document; SPA navigation reuses this promise.
   void initializeCatalog();
   onUnmounted(() => {
+    boundaryRequest?.abort();
     catalogRequest?.abort();
     indexRequest?.abort();
   });
@@ -148,6 +189,7 @@ function createWorkspace() {
     if (detection.inProgress.value || selectedRegion.value?.id === region?.id) return;
     catalogRequest?.abort();
     selectedRegion.value = region;
+    void selectAdministrativeRegion(null);
     setSelectedArea(null);
     loadedPhaseIds.value = [];
     activeMonth.value = '';
@@ -231,7 +273,9 @@ function createWorkspace() {
       fail('工作区正在编辑、加载或检测，请稍后再试');
     const region = selectedRegion.value;
     if (!region || (request.region_id && request.region_id !== region.id))
-      return fail('请先选择本次检测的行政区');
+      return fail('请先选择本次检测的影像来源');
+    if (request.admin_code) await useAdministrativeBoundary(request.admin_code, request.admin_version, isCurrent);
+    if (!isCurrent() || selectedRegion.value?.id !== region.id) return fail('工作区已变化，请重新选择检测区域');
     const aoi = detectionAoi.value;
     if (!aoi) return fail(selectionError.value);
     if (request.aoi && JSON.stringify(request.aoi) !== JSON.stringify(aoi))
@@ -360,6 +404,8 @@ function createWorkspace() {
       selectedArea.value,
       {
         region_id: region.id,
+        admin_code: administrativeBoundary.value?.id,
+        admin_version: administrativeBoundary.value?.properties.boundary_version,
         scene_ids: scenes.map((scene) => scene.id),
         aoi,
       },
@@ -439,6 +485,10 @@ function createWorkspace() {
     submitDetection,
     selectedArea,
     selectedGeometry,
+    selectedAdministrative,
+    administrativeBoundary,
+    selectAdministrativeRegion,
+    useAdministrativeBoundary,
     detectionAoi,
     selectionError,
     selectionEditing,

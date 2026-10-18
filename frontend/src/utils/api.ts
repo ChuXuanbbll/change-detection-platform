@@ -2,6 +2,7 @@ import axios, { AxiosError, AxiosResponse } from 'axios';
 
 export interface AreaBounds { west: number; south: number; east: number; north: number }
 export type AreaPolygon = GeoJSON.Polygon;
+export type AreaGeometry = GeoJSON.Polygon | GeoJSON.MultiPolygon;
 export interface ConfidenceHistograms {
   bin_edges: number[];
   changed_counts: number[];
@@ -97,7 +98,9 @@ export interface ImageInfo {
 }
 
 export interface LocalFetchPayload {
-  aoi?: AreaPolygon;
+  aoi?: AreaGeometry;
+  admin_code?: string;
+  admin_version?: string;
   progress_id?: string;
   model_id?: string;
   config_revision?: number;

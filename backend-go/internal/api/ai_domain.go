@@ -623,7 +623,7 @@ func sanitize(v any) any {
 
 func workspaceDTO(raw map[string]any) map[string]any {
 	out := map[string]any{}
-	for _, key := range []string{"revision", "page", "region_id", "region_name", "phase_ids", "phases", "available_phases", "catalog_status", "selection_error", "active_phase", "bounds", "aoi", "task_id", "result_id", "task", "detection"} {
+	for _, key := range []string{"revision", "page", "region_id", "region_name", "admin_code", "admin_version", "phase_ids", "phases", "available_phases", "catalog_status", "selection_error", "active_phase", "bounds", "aoi", "task_id", "result_id", "task", "detection"} {
 		if value, ok := raw[key]; ok {
 			out[key] = value
 		}
@@ -656,14 +656,51 @@ func forbiddenKey(k string) bool {
 }
 
 func (d *AIDomain) regionSearch(ctx context.Context, in map[string]any) (any, []string, error) {
-	data, _, err := d.pyJSON(ctx, "GET", "/py/local/regions", nil)
-	if err != nil {
-		return nil, nil, err
-	}
 	query := strings.ToLower(strings.TrimSpace(str(in["query"])))
 	rid := strings.TrimSpace(str(in["region_id"]))
 	requestedPath := stringSlice(in["admin_path"])
 	matches := []any{}
+	// County knowledge is independent of the 14 business imagery groups.
+	if query != "" || rid != "" || len(requestedPath) > 0 {
+		counties, e := d.d.DB.AdministrativeRegions("", "county")
+		if e == nil {
+			for _, f := range counties {
+				p := f.Properties
+				aliases := [][]string{p.Path}
+				if p.SourceID == "xiongan" {
+					aliases = append(aliases, []string{"河北省", "雄安新区", p.Name})
+				}
+				if p.Code == "130682" || p.Code == "130181" {
+					aliases = append(aliases, []string{"河北省", p.Name})
+				}
+				pathMatch := len(requestedPath) == 0
+				queryMatch := query == ""
+				for _, path := range aliases {
+					if len(requestedPath) > 0 && sameAdminPath(requestedPath, stringAny(path)) {
+						pathMatch = true
+					}
+					if query != "" && (query == strings.ToLower(strings.Join(path, "")) || query == strings.ToLower(p.Name) || query == p.Code) {
+						queryMatch = true
+					}
+				}
+				if !pathMatch || !queryMatch || (rid != "" && rid != p.Code && rid != p.SourceID) || (query == "" && len(requestedPath) == 0 && rid != p.Code) {
+					continue
+				}
+				var geometry any
+				if json.Unmarshal(f.Geometry, &geometry) != nil {
+					continue
+				}
+				matches = append(matches, map[string]any{"region_id": p.SourceID, "source_id": p.SourceID, "admin_code": p.Code, "boundary_version": p.Version, "name": p.Name, "level": p.Level, "admin_path": p.Path, "aoi_supported": true, "bounds": p.Bounds, "geometry": geometry, "data_date": p.DataDate})
+			}
+		}
+		if len(matches) > 0 {
+			return map[string]any{"matches": matches, "count": len(matches)}, nil, nil
+		}
+	}
+	data, _, err := d.pyJSON(ctx, "GET", "/py/local/regions", nil)
+	if err != nil {
+		return nil, nil, err
+	}
 	if m, ok := data.(map[string]any); ok {
 		if fs, ok := m["features"].([]any); ok {
 			for _, f := range fs {

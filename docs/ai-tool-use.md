@@ -75,7 +75,7 @@ Skill 位于 `backend-go/internal/ai/skills/<skill-name>/`，每个目录包含�
 
 “帮我查河北省保定市雄县 2025 年 1 月到 7 月的变化”先调用 `region.search`。唯一匹配才继续；重名或层级不完整时返回候选。行政区名称不会自动扩大到上级区域。
 
-行政区边界只有在单个、闭合、无孔、非自交 Polygon 时才可作为检测 AOI。MultiPolygon、有孔或无效环必须要求用户选择独立子区域或绘制合法区域，不能取包围盒。
+手绘 AOI 仍限单个、闭合、无孔、非自交 Polygon。明确要求按完整县级行政区检测时，使用 `use_admin_boundary=true`，由本轮 `region.search` 唯一匹配的县级代码与边界版本生成可信引用，允许完整 MultiPolygon 和孔洞。模型不生成县界坐标，也不能用包围盒或最大部件替代。普通县区定位／候选筛选保留已有 AOI。返回的 `region_id/source_id` 是业务影像来源，`admin_code` 才是县级代码，详见 [行政区知识库](administrative-boundaries.md)。
 
 ### 日期与时相
 

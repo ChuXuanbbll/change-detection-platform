@@ -46,13 +46,18 @@ function collection(index) {
   }) };
 }
 const json = (route, data) => route.fulfill({ json: data });
+const administrative = JSON.parse(await fs.readFile('data/boundaries/hebei-administrative.geojson', 'utf8'));
 await page.route('**/api/**', async route => {
   const req = route.request(), pathname = new URL(req.url()).pathname;
+  if (pathname === '/api/administrative-regions') {
+    const uri = new URL(req.url());
+    return json(route, { features: administrative.features.filter(f => f.properties.level === (uri.searchParams.get('level') || 'county') && (!uri.searchParams.get('source_id') || f.properties.source_id === uri.searchParams.get('source_id'))) });
+  }
   if (pathname === '/api/settings') return json(route, { revision:1, effective:true, settings: { default_model:'fixture-model', detection:{threshold:.5,resolution:.8,kernel_size:3,min_area_pixels:10}, browser:{concurrency:4,inactive_layers:3,cache_mb:128,idle_seconds:300} } });
   if (pathname === '/api/models') return json(route, [{id:'fixture-model',name:'Fixture ONNX',status:'ready',enabled:true,sha256:'test-hash',mapping:{}}]);
   if (pathname === '/api/algorithms') return json(route, { algorithms: [{ name: 'hebei_onnx', params_schema: { properties: { threshold: { type: 'number', default: .5 }, resolution: { type: 'number', default: .8 } } } }] });
   if (pathname.startsWith('/api/images/local/progress/')) return json(route, {id: preparationID, status:'running', stage:'mosaicking', progress:50});
-  if (pathname === '/api/images/local') { preparationID = req.postDataJSON().progress_id; await preparationGate; assert.deepEqual(req.postDataJSON().scene_ids, ['2023', '2023-supplement', '2024', '2025', '2026']); return json(route, { items: images, count: images.length, batch_id:"fixture-batch" }); }
+  if (pathname === '/api/images/local') { const selection=req.postDataJSON(); preparationID = selection.progress_id; await preparationGate; assert.deepEqual(selection.scene_ids, ['2023', '2023-supplement', '2024', '2025', '2026']); return json(route, { items: images.map(image => ({...image,meta_json:JSON.stringify({region_id:selection.region_id,aoi:selection.aoi})})), count: images.length, batch_id:"fixture-batch" }); }
   if (pathname.endsWith('/preview')) return route.fulfill({ contentType: 'image/png', body: Buffer.from(fixtures.frames['2023'], 'base64') });
   if (pathname === '/api/tasks' && req.method() === 'POST') { tasks.push(req.postDataJSON()); return json(route, { id: `task-${tasks.length}`, status: 'pending' }); }
   const m = pathname.match(/^\/api\/tasks\/task-(\d+)(.*)$/);
@@ -136,8 +141,8 @@ try {
   await navigate('comparison'); await page.getByText('从一个区域开始', { exact: true }).waitFor();
   await navigate('reports'); await page.getByText('暂无检测报告', { exact: true }).waitFor();
   await navigate('overview');
-  await page.getByRole('combobox', { name: '选择行政区' }).selectOption('130100');
-  const list = page.getByRole('region', { name: '行政区影像列表' });
+  await page.getByRole('combobox', { name: '选择影像来源' }).selectOption('130100');
+  const list = page.getByRole('region', { name: '影像来源列表' });
   await list.locator('[data-phase-id]').nth(3).waitFor();
   assert.ok(!catalogRequests[0].includes('refresh=true'), 'normal navigation reuses the catalog');
   assert.equal(await list.locator('[data-phase-id]').count(), 4, 'members are not separate list rows');
@@ -280,7 +285,7 @@ try {
     assert.equal(await page.locator('.empty-workspace').count(), 0);
     assertAligned(await positions());
     await navigate('overview');
-    assert.equal(await page.getByRole('combobox', { name: '选择行政区' }).inputValue(), '130100');
+    assert.equal(await page.getByRole('combobox', { name: '选择影像来源' }).inputValue(), '130100');
     assert.equal(await page.getByRole('tab').count(), 4);
     assert.equal(await page.getByRole('button', { name: '提交检测任务', exact: true }).isEnabled(), true);
   }

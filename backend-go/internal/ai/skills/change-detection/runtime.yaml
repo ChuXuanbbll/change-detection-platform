@@ -1,5 +1,5 @@
 id: change.detect.v1
-version: 2.0.0
+version: 2.1.0
 max_steps: 10
 input_schema:
   $schema: https://json-schema.org/draft/2020-12/schema
@@ -96,6 +96,8 @@ input_schema:
         minLength: 1
         maxLength: 128
     use_workspace_context:
+      type: boolean
+    use_admin_boundary:
       type: boolean
     use_previous_result:
       type: boolean

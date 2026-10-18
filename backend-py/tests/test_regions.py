@@ -1,4 +1,3 @@
-import hashlib
 import io
 import json
 import math
@@ -39,10 +38,10 @@ class RegionTests(unittest.TestCase):
         combined = unary_union(geometries)
         self.assertLess(sum(geom.area for geom in geometries) - combined.area, 1e-9)
         self.assertLess(combined.symmetric_difference(local.province()).area, 1e-9)
-        metadata = json.loads((regions.REGIONS.parent / 'regions-provenance.json').read_text(encoding='utf-8'))
-        for source in metadata['sources']:
-            raw = (regions.REGIONS.parent / source['file']).read_bytes()
-            self.assertEqual(hashlib.sha256(raw).hexdigest(), source['sha256'])
+        metadata = json.loads((regions.REGIONS.parent / 'hebei-administrative.geojson').read_text(encoding='utf-8'))
+        self.assertEqual(data['source'], metadata['source'])
+        self.assertEqual(data['data_date'], metadata['data_date'])
+        self.assertEqual(len(metadata['sources']), 13)
 
     def test_independent_regions_and_langfang_exclave(self):
         for child, parent in [('130682', '130600'), ('xiongan', '130600'), ('130181', '130100')]:

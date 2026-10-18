@@ -1,12 +1,12 @@
 import { ref, computed, onUnmounted } from 'vue';
 import axios from 'axios';
 import { fetchLocalImagery, getLocalProgress, createTask, getTask, getTaskResult, getMaskOverlay, downloadTaskResult } from '../utils/api';
-import type { AreaBounds, AreaPolygon, ChangePatchCollection, DetectionStats, ImageInfo, TaskInfo } from '../utils/api';
+import type { AreaBounds, AreaGeometry, ChangePatchCollection, DetectionStats, ImageInfo, TaskInfo } from '../utils/api';
 import { buildTimeline, pairBounds, phaseDate, type TimelinePair } from '../utils/timeline';
 import { parseDetectionStats } from '../utils/results';
 
 export interface ResultOverlayPayload {
-  aoi?: AreaPolygon;
+  aoi?: AreaGeometry;
   pair?: TimelinePair;
   maskDataUrl?: string;
   maskBounds?: [number, number, number, number];
@@ -52,7 +52,7 @@ export function useDetection() {
   const batchMessage = ref('');
   let pairIndex = 0;
   let batchId = "";
-  let batchAOI: AreaPolygon | undefined;
+  let batchAOI: AreaGeometry | undefined;
   let pollFailures = 0;
   let taskParams: Record<string, number | string | boolean> = {};
   let preparationTimer: ReturnType<typeof setTimeout> | null = null;
@@ -126,7 +126,7 @@ export function useDetection() {
   async function submitTask(
     getSelected: () => { algorithm: string; model_id?: string; config_revision?: number; params: Record<string, number | string | boolean> } | undefined,
     area: AreaBounds | null,
-    selection?: { region_id: string; scene_ids: string[]; aoi?: AreaPolygon },
+    selection?: { region_id: string; scene_ids: string[]; aoi?: AreaGeometry; admin_code?: string; admin_version?: string },
     isCurrent = () => true,
   ): Promise<void> {
     if (isSubmitting.value || inProgress.value) return;
@@ -161,7 +161,8 @@ export function useDetection() {
       if (batchAOI && response.items.length && response.items.some(image => {
         try {
           const meta = JSON.parse(image.meta_json || '{}');
-          return meta.aoi?.type !== 'Polygon' || meta.region_id !== frozenSelection.region_id ||
+          return meta.aoi?.type !== batchAOI!.type || meta.region_id !== frozenSelection.region_id ||
+            (frozenSelection.admin_code && (meta.admin_code !== frozenSelection.admin_code || meta.admin_version !== frozenSelection.admin_version)) ||
             JSON.stringify(meta.aoi.coordinates) !== JSON.stringify(batchAOI!.coordinates);
         } catch { return true; }
       })) throw new Error('裁切服务未确认多边形范围，请重启 Go 和 Python 服务后重新检测');

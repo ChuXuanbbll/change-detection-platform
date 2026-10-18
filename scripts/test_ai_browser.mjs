@@ -470,6 +470,9 @@ function fixtureForPage(page) {
       if (ackProbe) ackProbeSideEffects += 1;
       return json(route, regions);
     }
+    if (pathname === "/api/administrative-regions") {
+      return json(route, {features: new URL(route.request().url()).searchParams.get('level') === 'prefecture' ? regions.features : []});
+    }
     if (pathname === `/py/local/regions/${region.id}/scenes`)
       return json(route, scenes);
     if (pathname.startsWith(`/py/local/regions/${region.id}/scenes`))

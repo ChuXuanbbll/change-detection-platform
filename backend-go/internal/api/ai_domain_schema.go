@@ -35,11 +35,16 @@ func aiOutputSchema(tool string) map[string]any {
 		result = obj(map[string]any{"revision": s, "page": s, "region_id": s, "region_name": s, "phase_ids": arr(s), "phases": arr(obj(map[string]any{"id": s, "month": s, "scene_ids": arr(s)}, "id", "month", "scene_ids")), "active_phase": s, "bounds": nullable(bounds), "aoi": nullable(geometry), "task_id": s, "result_id": s, "task": obj(map[string]any{"status": s, "progress": i, "message": s})})
 		result["properties"].(map[string]any)["detection"] = obj(map[string]any{"model_id": s, "config_revision": i, "settings": obj(map[string]any{"threshold": n, "resolution": n, "kernel_size": n, "min_area_pixels": n})}, "model_id", "config_revision", "settings")
 		fields := result["properties"].(map[string]any)
+		fields["admin_code"] = s
+		fields["admin_version"] = s
 		fields["available_phases"] = fields["phases"]
 		fields["catalog_status"] = map[string]any{"type": "string", "enum": []any{"loading", "error", "ready"}}
 		fields["selection_error"] = s
 	case "region.search":
 		region := obj(map[string]any{"region_id": s, "name": s, "level": s, "admin_path": arr(s), "aoi_supported": b, "bounds": nullable(bounds), "geometry": nullable(geometry)}, "region_id", "name", "admin_path", "aoi_supported")
+		for _, key := range []string{"source_id", "admin_code", "boundary_version", "data_date"} {
+			region["properties"].(map[string]any)[key] = s
+		}
 		result = obj(map[string]any{"matches": arr(region), "count": i}, "matches", "count")
 	case "imagery.catalog":
 		result = obj(map[string]any{"images": arr(scene), "bounds": bounds, "boundary": nullable(geometry), "boundary_mode": s, "warning": nullable(s)}, "images", "bounds")

@@ -10,7 +10,9 @@ export interface AiWorkspaceContext {
   region_id?: string;
   phase_ids: string[];
   bounds?: [number, number, number, number];
-  aoi?: GeoJSON.Polygon;
+  aoi?: GeoJSON.Polygon | GeoJSON.MultiPolygon;
+  admin_code?: string;
+  admin_version?: string;
   task_id?: string;
   // Friendly metadata helps the model and UI explain opaque IDs without making
   // these values part of the command contract.

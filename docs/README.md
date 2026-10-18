@@ -15,7 +15,8 @@
 | [接口](API.md) | 对外接口与内部计算边界 |
 | [工作区](UI_WORKSPACE.md) | 四页交互、选区、结果口径与预览限制 |
 | [本地影像](LOCAL_IMAGERY.md) | 检测输入、目录索引与同月拼接 |
-| [行政区与兼容显示源](imagery-integration.md) | 区域键、边界及年度/外部显示接口 |
+| [影像来源与兼容显示源](imagery-integration.md) | 来源键、边界及年度/外部显示接口 |
+| [县级行政区知识库](administrative-boundaries.md) | 权威快照、省市县层级、来源映射、版本与完整县界检测 |
 | [检测进度](detection-progress.md) | 权重、阶段、持久化与失败语义 |
 | [瓦片加载](tile-loading.md) | 渲染、取消、重试、缓存与默认值 |
 | [开发与测试](DEVELOPMENT.md) | 代码入口、验证命令与修改约束 |

@@ -259,6 +259,8 @@ export function useAiAssistant(): AiAssistant {
       active_phase: workspaceStore.activeMonth.value || undefined,
       bounds: area ? [area.west, area.south, area.east, area.north] : undefined,
       aoi: workspaceStore.detectionAoi.value || undefined,
+      admin_code: workspaceStore.administrativeBoundary.value?.id,
+      admin_version: workspaceStore.administrativeBoundary.value?.properties.boundary_version,
       task_id: workspaceStore.currentTaskId.value || undefined,
       detection: workspaceStore.getDetectionSelection() ? { model_id: workspaceStore.selectedModel.value, config_revision: workspaceStore.getDetectionSelection()!.config_revision, settings: { ...workspaceStore.detectionSettings } } : undefined,
       task: task
@@ -286,6 +288,8 @@ export function useAiAssistant(): AiAssistant {
       catalog_status: workspace.value.catalog_status,
       bounds: workspace.value.bounds,
       aoi: workspace.value.aoi,
+      admin_code: workspace.value.admin_code,
+      admin_version: workspace.value.admin_version,
       task_id: workspace.value.task_id,
       active_phase: workspace.value.active_phase,
       detection: workspace.value.detection,
@@ -842,11 +846,16 @@ export function useAiAssistant(): AiAssistant {
             status: 'rejected',
             context_revision: contextRevision.value,
             workspace: workspace.value,
-            error: makeAiToolError('找不到请求的行政区', 'REGION_NOT_FOUND'),
+            error: makeAiToolError('找不到请求的影像来源', 'REGION_NOT_FOUND'),
           };
         await workspaceStore.selectWorkspaceRegion(feature, () => isCurrent(op), op.signal);
         requireCurrent(op);
         getAiMapAdapter()?.selectRegion?.(regionId);
+        if (typeof args.admin_code === 'string') {
+          const county = await getRegionData<import('../utils/regions').AdministrativeFeature>(`/api/administrative-regions/${encodeURIComponent(args.admin_code)}`, op.signal);
+          requireCurrent(op);
+          await workspaceStore.selectAdministrativeRegion(county);
+        }
         return { status: 'applied', context_revision: contextRevision.value, workspace: workspace.value };
       }
       case 'show_task':

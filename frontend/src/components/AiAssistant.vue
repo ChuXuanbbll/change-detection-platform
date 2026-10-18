@@ -249,7 +249,7 @@ watch(
             <div v-if="!visibleTurns.length" class="ai-empty-state">
               <span class="ai-empty-glyph" aria-hidden="true">✦</span>
               <p>描述要查询的区域、时相或检测结果</p>
-              <span>例如：查询雄县 2025 年 1 月到 7 月的变化</span>
+              <span>例如：对比当前框选区 2025 年 1 月到 7 月的影像</span>
             </div>
             <section
               v-for="turn in visibleTurns"

@@ -21,12 +21,14 @@ import {
   type RegionFeature,
   type RegionImagery,
   type ImageryPhase,
+  type AdministrativeFeature,
 } from '../utils/regions';
 import { containsProvincePoint, provincePolygons } from '../utils/province';
 import {
   getImageOverlay,
   type AreaBounds,
   type AreaPolygon,
+  type AreaGeometry,
   type ChangePatch,
   type DetectionStats,
   type ImageInfo,
@@ -56,6 +58,8 @@ const props = defineProps<{
   workspaceMode?: boolean;
   activePhase?: ImageryPhase;
   catalogPhases?: ImageryPhase[];
+  administrativeRegion?: AdministrativeFeature | null;
+  boundarySelection?: AdministrativeFeature | null;
 }>();
 const emit = defineEmits<{
   (e: 'area', bounds: AreaBounds | null, geometry?: AreaPolygon | null): void;
@@ -63,6 +67,8 @@ const emit = defineEmits<{
   (e: 'region', region: RegionFeature | null): void;
   (e: 'phase-drop', id: string): void;
   (e: 'phase-stale'): void;
+  (e: 'admin-region', region: AdministrativeFeature | null): void;
+  (e: 'use-admin-boundary'): void;
 }>();
 
 const mapRef = ref<HTMLDivElement | null>(null);
@@ -76,10 +82,78 @@ const baseMapsVisible = ref(true);
 const navigationVisible = ref(false);
 const regions = ref<RegionFeature[]>([]);
 const activeRegion = ref<RegionFeature | null>(null);
+const countyRegions = ref<AdministrativeFeature[]>([]);
+const countyBoundaryError = ref('');
+let countyBoundaryRequest: AbortController | null = null;
+let countyLayer: L.GeoJSON | null = null;
+let countyLabels: L.LayerGroup | null = null;
+const countyLabelEntries = new Map<string, { marker: L.Marker; leader: L.Polyline; feature: AdministrativeFeature }>();
+function drawCounties(): void {
+  countyLayer?.remove(); countyLayer = null;
+  countyLabels?.remove(); countyLabels = null;
+  countyLabelEntries.clear();
+  if (!map || !activeRegion.value) return;
+  const currentMap = map;
+  countyLabels = L.layerGroup().addTo(map);
+  countyLayer = L.geoJSON({type:'FeatureCollection', features:countyRegions.value} as GeoJSON.GeoJsonObject, {
+    pane: 'cdp-counties',
+    style: f => ({color: f?.id === props.administrativeRegion?.id ? '#22d3ee' : '#8bb3c9', weight: f?.id === props.administrativeRegion?.id ? 2.5 : 1, fillOpacity: 0.02}),
+    onEachFeature: (raw, layer) => {
+      const feature = raw as unknown as AdministrativeFeature;
+      layer.on('click', () => chooseCounty(feature));
+      const label = document.createElement('span'); label.textContent = feature.properties.name;
+      const marker = L.marker([feature.properties.label[1],feature.properties.label[0]], {
+        pane:'cdp-region-labels', interactive:false, keyboard:false,
+        icon:L.divIcon({className:'region-label county-label', html:label, iconSize:[120,22],iconAnchor:[60,11]}),
+      }).addTo(countyLabels!);
+      const leader = L.polyline([], {pane:'cdp-region-labels', interactive:false, color:'#94b8ce', weight:1, opacity:0.6}).addTo(countyLabels!);
+      countyLabelEntries.set(feature.id, {marker,leader,feature});
+    },
+  }).addTo(currentMap);
+  countyLayer.eachLayer(layer => {
+    const feature = (layer as L.GeoJSON).feature as GeoJSON.Feature | undefined;
+    const element = (layer as L.Path).getElement?.();
+    element?.setAttribute('data-admin-code', String(feature?.id || ''));
+    element?.setAttribute('aria-label', String(feature?.properties?.name || ''));
+  });
+  arrangeRegionLabels();
+}
+async function loadCounties(): Promise<void> {
+  countyBoundaryRequest?.abort();
+  countyRegions.value = []; countyBoundaryError.value = ''; drawCounties();
+  const source = activeRegion.value?.id; if (!source || !map) return;
+  const request = new AbortController(); countyBoundaryRequest = request;
+  try {
+    const data = await getRegionData<{features:AdministrativeFeature[]}>(`/api/administrative-regions?source_id=${encodeURIComponent(source)}`, request.signal);
+    if (request.signal.aborted || activeRegion.value?.id !== source || !map) return;
+    countyRegions.value = data.features; drawCounties();
+  } catch (error) { if (!request.signal.aborted) countyBoundaryError.value = error instanceof Error ? error.message : '县级边界加载失败'; }
+}
+const COUNTY_FOCUS_ZOOM = 12;
+function focusCounty(feature: AdministrativeFeature): void {
+  if (!map || map.getZoom() >= COUNTY_FOCUS_ZOOM) return;
+  const [w, s, e, n] = feature.properties.bounds;
+  const bounds = L.latLngBounds([[s, w], [n, e]]);
+  const zoom = Math.min(COUNTY_FOCUS_ZOOM, map.getBoundsZoom(bounds, false, L.point(64, 64)));
+  // Selecting a larger county must not undo the user's zoom.
+  if (zoom > map.getZoom()) animateToBounds(bounds, { padding: [32, 32], maxZoom: COUNTY_FOCUS_ZOOM });
+}
+function chooseCounty(feature: AdministrativeFeature | null): void {
+  if (!map || props.selectionDisabled || drawMode.value) return;
+  if (feature?.id !== props.administrativeRegion?.id) emit('admin-region', feature);
+  if (feature) focusCounty(feature);
+  else if (cityExtent) animateToBounds(cityExtent, { padding: [32, 32], maxZoom: 12 });
+}
+watch(() => props.administrativeRegion, feature => {
+  drawCounties();
+  if (feature && activeRegion.value?.id === feature.properties.source_id) focusCounty(feature);
+});
+watch(() => props.boundarySelection, () => { showSelection(props.selectionBounds); syncSelectionEditor(); });
 const regionYears = ref<number[]>([]);
 const regionYear = ref<number | null>(null);
 const isOverview = ref(true);
 let regionRequest: AbortController | null = null;
+let navigationRequest: AbortController | null = null;
 let regionMask: L.Polygon | null = null;
 let provinceExtent: L.LatLngBounds | null = null;
 let overviewZoom = 6;
@@ -87,6 +161,8 @@ let navigationAnimating = false;
 let cityExtent: L.LatLngBounds | null = null;
 let cityFitZoom = 6;
 let cityExitZoom = 5;
+const NAVIGATION_DURATION = 0.4;
+let navigationTarget: { bounds: L.LatLngBounds; options: L.FitBoundsOptions } | null = null;
 let navigationEnd: (() => void) | null = null;
 let regionNavigation: RegionNavigation | null = null;
 const dragOver = ref(false);
@@ -142,9 +218,14 @@ function updateOverviewZoom(): void {
 function cancelNavigation(): void {
   if (navigationEnd) map?.off('moveend', navigationEnd);
   navigationEnd = null;
+  const wasFlying = navigationTarget !== null;
+  navigationTarget = null;
   navigationAnimating = true;
   regionNavigation?.suspend(true);
-  map?.stop();
+  // stop() snaps a fractional fly zoom with a second asynchronous animation.
+  // Reset synchronously so that stale zoom cannot overwrite the next target.
+  if (map && wasFlying) map.setView(map.getCenter(), map.getZoom(), { animate: false });
+  else map?.stop();
 }
 
 function finishNavigation(): void {
@@ -154,15 +235,74 @@ function finishNavigation(): void {
   regionNavigation?.suspend(false);
   regionNavigation?.correct();
   navigationAnimating = false;
+  if (navigationTarget && isOverview.value && provinceExtent) map?.setMaxBounds(provinceExtent);
+  navigationTarget = null;
+  arrangeRegionLabels();
+  showRegionLabels();
+}
+
+function hideRegionLabels(): void {
+  const pane = map?.getPane('cdp-region-labels');
+  if (!pane) return;
+  pane.style.transition = 'none';
+  pane.style.opacity = '0';
+}
+
+function showRegionLabels(): void {
+  const pane = map?.getPane('cdp-region-labels');
+  if (!pane || navigationAnimating) return;
+  // Commit the hidden state even when a short or interrupted flight finishes
+  // in the same frame; fade the entire pane, including county leader lines.
+  void pane.offsetWidth;
+  pane.style.transition = 'opacity 0.2s ease';
+  pane.style.opacity = '1';
+}
+
+function animateToBounds(bounds: L.LatLngBounds, options: L.FitBoundsOptions = {}): void {
+  if (!map) return;
+  if (navigationTarget?.bounds.equals(bounds) &&
+      JSON.stringify(navigationTarget.options) === JSON.stringify(options)) return;
+  cancelNavigation();
+  hideRegionLabels();
+  navigationTarget = { bounds, options };
+  const started = Date.now();
+  // A flight can start inside a previous zoomend (automatic province exit).
+  // That previous moveend must not complete the newly started flight.
+  navigationEnd = () => {
+    if (Date.now() - started < NAVIGATION_DURATION * 1000) return;
+    finishNavigation();
+  };
+  map.on('moveend', navigationEnd);
+  try {
+    if (!L.Browser.any3d) {
+      map.fitBounds(bounds, { ...options, animate: false });
+      finishNavigation();
+      return;
+    }
+    map.flyToBounds(bounds, { ...options, duration: NAVIGATION_DURATION });
+  } catch {
+    finishNavigation();
+  }
 }
 
 function arrangeRegionLabels(): void {
   if (!map) return;
+  const container = map.getContainer(), extent = container.getBoundingClientRect();
+  const controls = [toolbarRef.value, layersRef.value, ...container.querySelectorAll<HTMLElement>('.leaflet-control')]
+    .filter((node): node is HTMLElement => !!node && node.isConnected)
+    .map(node => node.getBoundingClientRect());
   const occupied: { x: number; y: number; width: number }[] = [];
-  for (const { marker, leader, feature } of regionLabels.values()) {
+  for (const entry of regionLabels.values()) entry.marker.setOpacity(isOverview.value ? 1 : 0);
+  const entries = isOverview.value ? regionLabels.values() : countyLabelEntries.values();
+  if (!isOverview.value) for (const entry of regionLabels.values()) entry.leader.setLatLngs([]);
+  for (const { marker, leader, feature } of entries) {
+    marker.setOpacity(1);
     const [lng, lat] = feature.properties.label;
     const original = L.latLng(lat, lng);
     const point = map.latLngToContainerPoint(original);
+    if (point.x < 0 || point.y < 0 || point.x > extent.width || point.y > extent.height) {
+      marker.setOpacity(0); leader.setLatLngs([]); continue;
+    }
     const width = feature.properties.name.length * 12 + 8;
     let target = point;
     const offsets = [
@@ -180,8 +320,15 @@ function arrangeRegionLabels(): void {
       [64, -48],
       [-64, 48],
     ];
+    for (let radius = 72; radius <= 240; radius += 24) {
+      for (let delta = -radius; delta <= radius; delta += 24) {
+        offsets.push([delta,-radius],[delta,radius],[-radius,delta],[radius,delta]);
+      }
+    }
     for (const [dx, dy] of offsets) {
       const candidate = L.point(point.x + dx, point.y + dy);
+      if (candidate.x < width/2+8 || candidate.x > extent.width-width/2-8 || candidate.y < 14 || candidate.y > extent.height-14) continue;
+      if (controls.some(rect => candidate.x + width/2 + 4 > rect.left-extent.left && candidate.x-width/2-4 < rect.right-extent.left && candidate.y+14 > rect.top-extent.top && candidate.y-14 < rect.bottom-extent.top)) continue;
       if (
         occupied.every(
           (box) =>
@@ -201,6 +348,11 @@ function arrangeRegionLabels(): void {
 }
 
 function clearRegionNavigation(): void {
+  countyBoundaryRequest?.abort();
+  countyLayer?.remove(); countyLayer = null;
+  countyLabels?.remove(); countyLabels = null;
+  countyRegions.value = [];
+  countyLabelEntries.clear();
   cancelNavigation();
   regionNavigation?.setRegion(null);
   cityExtent = null;
@@ -237,9 +389,16 @@ function returnToProvince(fit = true, notify = true): void {
   setDrawMode(false);
   showSelection(null);
   regionPaths.forEach((layer, id) => layer.setStyle(regionStyle(id)));
-  if (fit) updateOverviewZoom();
+  if (fit && map && provinceExtent && hasVisibleMap()) {
+    map.setMinZoom(0);
+    overviewZoom = map.getBoundsZoom(provinceExtent, false, L.point(48, 48));
+    map.setMinZoom(overviewZoom);
+    map.setMaxBounds(L.latLngBounds([]));
+    animateToBounds(provinceExtent, { padding: [24, 24] });
+  }
   if (notify) emit('area', null);
   if (notify && props.workspaceMode) emit('region', null);
+  arrangeRegionLabels();
 }
 
 function loadActivePhase(): void {
@@ -363,12 +522,12 @@ function selectRegion(feature?: RegionFeature, fitCity = true, resetArea = true)
       : Math.min(overviewZoom, cityExitZoom),
   );
   if (fitCity) {
-    navigationEnd = finishNavigation;
-    map.once('moveend', navigationEnd);
-    map.flyToBounds(extent, { padding: [32, 32], maxZoom: 12, duration: 0.8 });
+    animateToBounds(extent, { padding: [32, 32], maxZoom: 12 });
   } else finishNavigation();
   if (props.workspaceMode) emit('region', feature);
   else void loadRegionImagery();
+  void loadCounties();
+  arrangeRegionLabels();
 }
 
 function selectRegionById(regionId: string): void {
@@ -386,6 +545,7 @@ function installRegions(data: RegionCollection): void {
   const [w, s, e, n] = data.bounds;
   provinceExtent = L.latLngBounds([s, w], [n, e]);
   m.createPane('cdp-regions').style.zIndex = '400';
+  m.createPane('cdp-counties').style.zIndex = '410';
   const labels = m.createPane('cdp-region-labels');
   labels.style.zIndex = '660';
   labels.style.pointerEvents = 'none';
@@ -395,7 +555,9 @@ function installRegions(data: RegionCollection): void {
     onEachFeature: (f, layer) => {
       const feature = f as unknown as RegionFeature;
       regionPaths.set(feature.id, layer as L.Path);
-      layer.on('click', () => selectRegion(feature));
+      layer.on('click', () => {
+        if (isOverview.value) selectRegion(feature);
+      });
       const [lng, lat] = feature.properties.label;
       const label = document.createElement('span');
       label.textContent = feature.properties.name;
@@ -426,7 +588,9 @@ function installRegions(data: RegionCollection): void {
   }
   updateOverviewZoom();
   m.on('resize', updateOverviewZoom);
+  m.on('movestart zoomstart', hideRegionLabels);
   m.on('moveend zoomend resize', arrangeRegionLabels);
+  m.on('moveend', showRegionLabels);
   arrangeRegionLabels();
   m.on('zoomend', () => {
     if (
@@ -441,19 +605,22 @@ function installRegions(data: RegionCollection): void {
       returnToProvince();
   });
   // A pointer/keyboard gesture can interrupt flyTo without its final moveend.
-  m.getContainer().addEventListener('pointerdown', interruptNavigation);
-  m.getContainer().addEventListener('wheel', interruptNavigation, { passive: true });
-  m.getContainer().addEventListener('keydown', interruptNavigation);
+  m.getContainer().addEventListener('pointerdown', interruptNavigation, true);
+  m.getContainer().addEventListener('wheel', interruptNavigation, { passive: true, capture: true });
+  m.getContainer().addEventListener('keydown', interruptNavigation, true);
 }
 
 function interruptNavigation(): void {
-  if (!navigationAnimating || !map || !cityExtent) return;
+  if (!navigationAnimating || !map) return;
+  const target = navigationTarget;
   cancelNavigation();
-  // Complete the entry before applying the user's gesture, so an interrupted
-  // flight cannot leave the city below its exit threshold or with stale guards.
-  map.fitBounds(cityExtent, { padding: [32, 32], maxZoom: 12, animate: false });
+  // Complete this flight's target (province, city, county or result) before
+  // applying the gesture, rather than resetting every interruption to the city.
+  if (target) map.fitBounds(target.bounds, { ...target.options, animate: false });
+  navigationTarget = target;
   finishNavigation();
 }
+
 type Bounds = [number, number, number, number];
 interface ImageLayerEntry {
   key: string;
@@ -464,7 +631,7 @@ interface ImageLayerEntry {
   error: string;
 }
 interface ResultLayerEntry {
-  aoi?: AreaPolygon;
+  aoi?: AreaGeometry;
   key: string;
   pair?: TimelinePair;
   color: string;
@@ -512,7 +679,7 @@ let edgeDrag: {
   pointerId: number;
 } | null = null;
 let selectionPolygon: L.Polygon | null = null;
-let displayedGeometry: AreaPolygon | null = null;
+let displayedGeometry: AreaGeometry | null = null;
 let selectionRect: L.Rectangle | null = null;
 let selectionLabel: L.Marker | null = null;
 let selectionLabelContent: HTMLDivElement | null = null;
@@ -525,6 +692,8 @@ let drawPointerId: number | null = null;
 let resizeObserver: ResizeObserver | null = null;
 const statsPanelRef = ref<HTMLElement | null>(null);
 const toolbarRef = ref<HTMLElement | null>(null);
+const layersRef = ref<HTMLElement | null>(null);
+watch(layersExpanded, () => { void nextTick(arrangeRegionLabels); });
 const resultAnchor = ref<{ x: number; y: number } | null>(null);
 const activeImageKey = computed(
   () => imageEntries.value.find((entry) => entry.visible && !entry.loading && !entry.error)?.key,
@@ -605,6 +774,8 @@ function updateSelectionPixels(): void {
         body: JSON.stringify({
           bounds: [bounds.west, bounds.south, bounds.east, bounds.north],
           aoi: displayedGeometry ?? undefined,
+          admin_code: props.boundarySelection?.id,
+          admin_version: props.boundarySelection?.properties.boundary_version,
           region_id: phase.region_id,
           scene_ids: phase.scenes.filter((scene) => scene.available).map((scene) => scene.id),
         }),
@@ -628,14 +799,14 @@ function showSelection(
 ): void {
   if (!map) return;
   displayedSelection = bounds ?? null;
-  displayedGeometry = bounds ? (geometry ?? null) : null;
+  displayedGeometry = bounds ? (props.boundarySelection?.geometry ?? geometry ?? null) : null;
   selectionPolygon?.remove();
   selectionPolygon = null;
   if (displayedGeometry) {
     selectionRect?.remove();
     selectionRect = null;
     selectionPolygon = L.polygon(
-      displayedGeometry.coordinates[0].map(([lng, lat]) => [lat, lng] as L.LatLngTuple),
+      provincePolygons(displayedGeometry).map(polygon => polygon.map(ring => ring.map(([lng,lat]) => [lat,lng] as L.LatLngTuple))),
       { pane: 'cdp-area', color: '#22d3ee', weight: 2, fillOpacity: 0.08, interactive: false },
     ).addTo(map);
   }
@@ -733,7 +904,6 @@ function setDrawMode(enabled: boolean): void {
   if (!map) return;
   for (const handler of [
     map.dragging,
-    map.doubleClickZoom,
     map.scrollWheelZoom,
     map.boxZoom,
     map.touchZoom,
@@ -896,6 +1066,7 @@ function syncSelectionEditor(): void {
   clearDraftLayers();
   polygonMode.value = null;
   polygonPoints = [];
+  if (props.boundarySelection) return;
   if (props.selectionDisabled || !props.selectionBounds || !activeRegion.value) return;
   const initial: Position[] | null = props.selectionGeometry
     ? props.selectionGeometry.coordinates[0].slice(0, -1).map((p) => [p[0], p[1]])
@@ -1282,8 +1453,8 @@ function updateResultBounds(): void {
   const style = { pane: 'cdp-area', color: '#f59e0b', weight: 2, fill: false, interactive: false };
   if (resultEntries.value.some((entry) => entry.aoi)) {
     const outlines = resultEntries.value.flatMap((entry) => {
+      if (entry.aoi) return provincePolygons(entry.aoi).map(polygon => polygon.map(ring => ring.map(([lng,lat]) => [lat,lng] as L.LatLngTuple)));
       const points =
-        entry.aoi?.coordinates[0] ??
         (entry.bounds
           ? rectanglePoints({
               south: entry.bounds[0],
@@ -1414,20 +1585,17 @@ function flyToBounds(b: [number, number, number, number], padding: number = 0): 
     map.invalidateSize({ pan: false });
     // Programmatic result positioning must obey city bounds without triggering
     // the user-only zoom-out exit. Keep the result panel's existing padding.
-    regionNavigation?.suspend(false);
-    map.fitBounds(
+    animateToBounds(
       toLatLngBounds(b),
       resultRect
         ? {
-            animate: false,
             paddingTopLeft: [padding, Math.min(180, map.getSize().y / 2)],
             paddingBottomRight: [Math.min(240, map.getSize().x / 2), padding],
           }
-        : { padding: [padding, padding], animate: false },
+        : { padding: [padding, padding] },
     );
   } catch {
     /* 非法/退化 bounds 时忽略，保持当前视野 */
-  } finally {
     finishNavigation();
   }
 }
@@ -1527,6 +1695,7 @@ onMounted(() => {
   if (!mapRef.value) return;
   const m = L.map(mapRef.value, {
     ...LOCAL_MAP_OPTIONS,
+    doubleClickZoom: false,
   });
   map = m;
   regionNavigation = new RegionNavigation(m);
@@ -1534,12 +1703,14 @@ onMounted(() => {
   // Parent stacking contexts prevent even long timelines crossing layer groups.
   m.createPane('cdp-images').style.zIndex = '300';
   m.createPane('cdp-results').style.zIndex = '500';
-  getRegionData<RegionCollection>('/py/local/regions')
+  const request = new AbortController();
+  navigationRequest = request;
+  getRegionData<RegionCollection>('/py/local/regions', request.signal)
     .then((data) => {
       if (map === m) installRegions(data);
     })
     .catch((error) => {
-      if (map === m) boundaryError.value = String(error);
+      if (map === m && !request.signal.aborted) boundaryError.value = String(error);
     });
   const areaPane = m.createPane('cdp-area');
   areaPane.style.zIndex = '700';
@@ -1550,6 +1721,13 @@ onMounted(() => {
   showSelection(props.selectionBounds);
   syncSelectionEditor();
   m.on('move zoom resize', updateResultAnchor);
+  m.on('dblclick', (event: L.LeafletMouseEvent) => {
+    if (isOverview.value || polygonMode.value || props.selectionDisabled) return;
+    // The mask is non-interactive: test geography, not the underlying city path.
+    const point: Position = [event.latlng.lng, event.latlng.lat];
+    if (countyRegions.value.some(feature => regionCoversPoint(feature.geometry, point))) return;
+    returnToProvince();
+  });
   const container = m.getContainer();
   container.addEventListener('pointerdown', onAreaPointerDown);
   container.addEventListener('pointermove', onAreaPointerMove);
@@ -1579,6 +1757,7 @@ onActivated(() => {
   });
 });
 onDeactivated(() => {
+  interruptNavigation();
   window.removeEventListener('keydown', onAreaKeydown);
   resizeObserver?.disconnect();
   setDrawMode(false);
@@ -1588,6 +1767,8 @@ onDeactivated(() => {
 });
 
 onUnmounted(() => {
+  navigationRequest?.abort();
+  countyBoundaryRequest?.abort();
   clearTimeout(pixelTimer);
   pixelRequest?.abort();
   cancelNavigation();
@@ -1602,9 +1783,9 @@ onUnmounted(() => {
   clearDraftLayers();
   if (map) {
     const container = map.getContainer();
-    container.removeEventListener('pointerdown', interruptNavigation);
-    container.removeEventListener('wheel', interruptNavigation);
-    container.removeEventListener('keydown', interruptNavigation);
+    container.removeEventListener('pointerdown', interruptNavigation, true);
+    container.removeEventListener('wheel', interruptNavigation, true);
+    container.removeEventListener('keydown', interruptNavigation, true);
     container.removeEventListener('pointerdown', onAreaPointerDown);
     container.removeEventListener('pointermove', onAreaPointerMove);
     container.removeEventListener('pointerup', onAreaPointerUp);
@@ -1623,7 +1804,7 @@ onUnmounted(() => {
     class="w-full h-full relative overflow-hidden flex flex-col"
     :class="{ 'region-hover-enabled': !drawMode, 'region-overview': isOverview }"
   >
-    <section class="shrink-0 p-2 text-xs divider-b" aria-label="行政区导航">
+    <section class="shrink-0 p-2 text-xs divider-b" aria-label="影像来源导航">
       <div class="flex flex-wrap items-center gap-2">
         <button
           class="btn-secondary px-2 py-1"
@@ -1633,7 +1814,7 @@ onUnmounted(() => {
           河北全省
         </button>
         <select
-          aria-label="选择行政区"
+          aria-label="选择影像来源"
           class="region-select"
           :disabled="selectionDisabled"
           :value="activeRegion?.id || ''"
@@ -1643,11 +1824,19 @@ onUnmounted(() => {
             )
           "
         >
-          <option value="" disabled>选择行政区</option>
+          <option value="" disabled>选择影像来源</option>
           <option v-for="feature in regions" :key="feature.id" :value="feature.id">
             {{ feature.properties.name }}
           </option>
         </select>
+        <select v-if="activeRegion && workspaceMode" aria-label="选择县级行政区" class="region-select"
+          :disabled="selectionDisabled || !countyRegions.length" :value="administrativeRegion?.id || ''"
+          @change="chooseCounty(countyRegions.find(f => f.id === ($event.target as HTMLSelectElement).value) || null)">
+          <option value="">全部县区</option>
+          <option v-for="county in countyRegions" :key="county.id" :value="county.id">{{ county.properties.name }}</option>
+        </select>
+        <button v-if="administrativeRegion" class="btn-secondary px-2 py-1" :disabled="selectionDisabled" @click="emit('use-admin-boundary')">以{{ administrativeRegion.properties.name }}边界作为检测范围</button>
+        <span v-if="countyBoundaryError" role="alert" class="text-rose-400">{{ countyBoundaryError }}</span>
         <select
           v-if="!workspaceMode && regionYears.length"
           aria-label="影像年份"
@@ -1779,6 +1968,7 @@ onUnmounted(() => {
       </p>
       <section
         v-if="!isOverview"
+        ref="layersRef"
         class="absolute left-3 bottom-6 z-[1100] panel text-xs max-w-[calc(100%-24px)] flex flex-col max-h-[35%] md:max-h-[55%]"
         :class="layersExpanded ? 'w-[340px]' : ''"
         aria-label="图层控制"

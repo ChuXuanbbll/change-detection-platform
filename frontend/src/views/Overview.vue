@@ -9,6 +9,10 @@ import type { AreaBounds, AreaPolygon } from '../utils/api';
 const {
   selectedArea,
   selectedGeometry,
+  selectedAdministrative,
+  administrativeBoundary,
+  selectAdministrativeRegion,
+  useAdministrativeBoundary,
   selectionEditing,
   setSelectedArea,
   images,
@@ -104,6 +108,12 @@ function detectLoaded() {
     return;
   void submitDetection().catch(() => {});
 }
+function selectCountyBoundary() {
+  void useAdministrativeBoundary().catch((error: unknown) => {
+    if (error instanceof DOMException && error.name === 'AbortError') return;
+    taskError.value = error instanceof Error ? error.message : '县界加载失败，请重试';
+  });
+}
 </script>
 <template>
   <div class="overview-layout">
@@ -143,10 +153,14 @@ function detectLoaded() {
         :catalog-phases="catalogPhases"
         :selection-bounds="selectedArea"
         :selection-geometry="selectedGeometry"
+        :administrative-region="selectedAdministrative"
+        :boundary-selection="administrativeBoundary"
         :selection-disabled="inProgress"
         @area="areaChanged"
         @editing="selectionEditing = $event"
         @region="selectWorkspaceRegion"
+        @admin-region="selectAdministrativeRegion"
+        @use-admin-boundary="selectCountyBoundary"
         @phase-drop="addPhase"
         @phase-stale="refreshCatalog(false)"
       />
@@ -164,6 +178,7 @@ function detectLoaded() {
           @remove="removePhase"
           @refresh="refreshCatalog()"
         />
+        <p v-if="administrativeBoundary" class="text-xs p-2" role="status">检测范围：{{ administrativeBoundary.properties.name }}完整县界（天地图 {{ administrativeBoundary.properties.data_date }} 公开轮廓；有效覆盖以所选影像为准）</p>
         <ImageManager
           :bounds="selectedArea"
           :geometry="selectedGeometry"
@@ -206,9 +221,9 @@ function detectLoaded() {
           <div class="detection-progress-fill" :style="{ width: `${taskProgress}%` }" />
         </div>
         <p>{{ inProgress ? taskStageLabel : batchMessage }}</p>
-        <p v-if="inProgress" class="text-xs text-muted">
+        <!-- <p v-if="inProgress" class="text-xs text-muted">
           可切换页面；关闭或刷新浏览器会停止后续组的提交，当前已提交任务继续执行。
-        </p>
+        </p> -->
         <p v-if="taskError" class="error-text">{{ taskError }}</p>
       </section>
       <p v-if="overlayMsg" class="warning-text">{{ overlayMsg }}</p>

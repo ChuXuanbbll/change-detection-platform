@@ -49,6 +49,7 @@ func RegisterRoutes(r *gin.Engine, d *Deps) {
 
 	// 业务 API
 	api := r.Group("/api")
+	registerAdministrativeRoutes(api, d)
 	if d.AI != nil {
 		d.AI.Register(api)
 	}

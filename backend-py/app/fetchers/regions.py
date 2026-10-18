@@ -8,7 +8,7 @@ from shapely.geometry import shape
 
 from app.fetchers import local
 
-REGIONS = local.DATA / 'boundaries/hebei-regions.geojson'
+REGIONS = local.DATA / 'boundaries/hebei-source-groups.geojson'
 MAP_SOURCES = local.DATA / 'imagery/map-sources.json'
 
 
@@ -29,7 +29,7 @@ def region_collection():
             raise ValueError('Expected 14 WGS84 regions')
         return data
     except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise local.BoundaryUnavailable('行政区边界缺失或无效，请运行 scripts/prepare_hebei_regions.py') from exc
+        raise local.BoundaryUnavailable('影像来源边界缺失或无效，请运行 scripts/prepare_admin_boundaries.py') from exc
 
 
 def region_feature(region_id):
