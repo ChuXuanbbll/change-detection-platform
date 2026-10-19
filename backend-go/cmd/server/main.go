@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"cdp/backend-go/internal/ai"
 	"cdp/backend-go/internal/api"
 	"cdp/backend-go/internal/client"
 	"cdp/backend-go/internal/model"
@@ -152,9 +153,27 @@ func main() {
 		},
 		UploadMaxMB: cfg.UploadMaxMB,
 	}
+	if err := api.LoadAdministrativeRegions(deps); err != nil {
+		log.Fatalf("[administrative] 加载行政区边界失败: %v", err)
+	}
 	management, err := api.NewManagement(deps)
 	if err != nil {
 		log.Fatal(err)
+	}
+	aiDomain, err := api.NewAIDomain(deps)
+	if err != nil {
+		log.Fatalf("[ai] 初始化工具域失败: %v", err)
+	}
+	aiGateway, err := ai.NewGateway(cfg.DataDir, aiDomain.Specs(), aiDomain)
+	if err != nil {
+		log.Fatalf("[ai] 初始化网关失败: %v", err)
+	}
+	defer aiGateway.Close()
+	deps.AI = aiGateway
+	// Management is initialized before the gateway so the gateway can safely
+	// receive the persisted provider settings after construction.
+	if revision, e := db.ActiveRevision(); e == nil {
+		management.ConfigureAI(revision.Settings)
 	}
 	api.RegisterRoutes(r, deps)
 	go func() {

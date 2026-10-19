@@ -11,6 +11,7 @@ const url = process.env.FRONTEND_URL || 'http://localhost:5173';
 const output = path.resolve(process.env.BROWSER_OUTPUT_DIR || 'data/validation/layer-controls');
 await fs.mkdir(output, { recursive: true });
 const browser = await chromium.launch({ channel: 'chrome', headless: true });
+const administrative = JSON.parse(await fs.readFile('data/boundaries/hebei-administrative.geojson', 'utf8'));
 const bounds = [114.3208, 38.1130, 114.3228, 38.1150];
 const dates = ['2023-11-01', '2024-09-01', '2025-11-01', '2026-05-01'];
 const images = dates.map(date => ({ id: date.slice(0, 4), source: 'local', phase: '',
@@ -63,8 +64,12 @@ try {
     const json = (route, data) => route.fulfill({ json: data });
     await page.route('**/api/**', route => {
       const request = route.request(), pathname = new URL(request.url()).pathname;
+      if (pathname === '/api/administrative-regions') {
+        const uri = new URL(request.url());
+        return json(route, { features:administrative.features.filter(f => f.properties.level === (uri.searchParams.get('level') || 'county') && (!uri.searchParams.get('source_id') || f.properties.source_id === uri.searchParams.get('source_id'))) });
+      }
       if (pathname === '/api/algorithms') return json(route, { algorithms: [{ name: 'hebei_onnx', params_schema: { properties: {} } }] });
-      if (pathname === '/api/images/local') return json(route, { items: images, count: images.length });
+      if (pathname === '/api/images/local') { const selection=request.postDataJSON(); return json(route, { items: images.map(image => ({...image,meta_json:JSON.stringify({region_id:selection.region_id,aoi:selection.aoi})})), count: images.length }); }
       if (/\/preview$/.test(pathname)) return route.fulfill({ contentType: 'image/png', body: Buffer.from(png.frames['2023'], 'base64') });
       if (pathname === '/api/tasks' && request.method() === 'POST') {
         const data = request.postDataJSON();
@@ -115,8 +120,8 @@ try {
       phases: scenes.map(scene => ({ id: scene.id, region_id: '130100', month: scene.date.slice(0, 7), scenes: [scene], available: true, bounds: null, version: 'fixture' })) }));
     await page.route('**/py/local/regions/*/mosaic/**', route => route.fulfill({ contentType: 'image/png', body: Buffer.from(png.frames['2023'], 'base64') }));
     await page.goto(url);
-    await page.getByRole('combobox', { name: '选择行政区' }).selectOption('130100');
-    const list = page.getByRole('region', { name: '行政区影像列表' });
+    await page.getByRole('combobox', { name: '选择影像来源' }).selectOption('130100');
+    const list = page.getByRole('region', { name: '影像来源列表' });
     await list.locator('[data-phase-id]').nth(3).waitFor();
     for (const image of images) await list.locator(`[data-phase-id="${image.id}"]`).getByRole('button', { name: /^加入 .* 时相$/ }).click();
     assert.equal(await page.locator('input[type="range"]').count(), 0);

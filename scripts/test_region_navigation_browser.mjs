@@ -23,7 +23,7 @@ try {
     await page.route('**/py/local/regions/*/scenes*', route => route.fulfill({ json: { scenes: [], phases: [] } }));
     await page.goto(url);
     const root = page.locator('[data-map-workspace]');
-    const select = page.getByRole('combobox', { name: '选择行政区' });
+    const select = page.getByRole('combobox', { name: '选择影像来源' });
     await page.locator('[data-region-id="130700"]').waitFor();
     await page.evaluate(async () => { window.viewMath = await import('/src/utils/regionView.ts'); });
     await root.evaluate(node => {
@@ -131,17 +131,19 @@ try {
         node.__vueParentComponent.parent.setupState.selectedArea = { south: 40.7, west: 114.7, north: 40.75, east: 114.75 };
       });
       await page.getByRole('button', { name: '提交检测任务', exact: true }).click();
-      await page.waitForFunction(() => document.querySelector('select[aria-label="选择行政区"]').disabled);
+      await page.waitForFunction(() => document.querySelector('select[aria-label="选择影像来源"]').disabled);
       await root.evaluate(node => { const s = node.__vueParentComponent.setupState; s.map.setZoom(0, { animate: false }); });
       const locked = await state();
       assert.equal(locked.id, '130700'); assert.equal(locked.zoom, locked.exit + 0.25);
       assert.equal(await page.getByRole('tab').count(), 2);
       releaseCrop();
-      await page.waitForFunction(() => !document.querySelector('select[aria-label="选择行政区"]').disabled);
+      await page.waitForFunction(() => !document.querySelector('select[aria-label="选择影像来源"]').disabled);
       // Result navigation at high zoom and another city's programmatic selection.
       await root.evaluate(node => node.__vueParentComponent.exposed.flyToBounds([40.7, 114.7, 40.75, 114.75], 32));
+      await settle();
       assert.equal((await state()).id, '130700'); assert.ok((await state()).valid);
       await root.evaluate(node => node.__vueParentComponent.exposed.flyToBounds([36.55, 114.45, 36.6, 114.5], 32));
+      await settle();
       assert.equal((await state()).id, '130400'); assert.ok((await state()).valid);
       await root.evaluate(node => { const s = node.__vueParentComponent.setupState; s.map.setZoom(s.cityExitZoom, { animate: false }); });
       assert.equal(await select.inputValue(), ''); assert.equal(await page.locator('.leaflet-tile').count(), 0);

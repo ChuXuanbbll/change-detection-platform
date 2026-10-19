@@ -14,7 +14,9 @@ from app.fetchers.regions import region_collection, region_feature, display_sour
 router = APIRouter(prefix='/py', tags=['local-imagery'])
 
 class LocalFetchRequest(BaseModel):
-    aoi: Any = Field(None, description='WGS84 GeoJSON Polygon，单个无孔闭合环')
+    admin_code: str | None = None
+    admin_version: str | None = None
+    aoi: Any = Field(None, description='手绘无孔 Polygon；admin_code 模式使用知识库完整 Polygon/MultiPolygon')
     bounds: List[float] = Field(..., min_length=4, max_length=4)
     start_date: str = '0001-01-01'
     end_date: str = '9999-12-31'
@@ -25,7 +27,9 @@ class LocalFetchRequest(BaseModel):
     scene_ids: List[str] | None = None
 
 class SelectionPixelsRequest(BaseModel):
-    aoi: Any = Field(None, description='WGS84 GeoJSON Polygon，单个无孔闭合环')
+    admin_code: str | None = None
+    admin_version: str | None = None
+    aoi: Any = Field(None, description='手绘无孔 Polygon；admin_code 模式使用知识库完整 Polygon/MultiPolygon')
     bounds: List[float] = Field(..., min_length=4, max_length=4)
     region_id: str
     scene_ids: List[str] = Field(..., min_length=1)
@@ -34,7 +38,7 @@ class SelectionPixelsRequest(BaseModel):
 @router.post('/local/selection-pixels')
 def get_selection_pixels(req: SelectionPixelsRequest):
     try:
-        return selection_pixels(req.bounds, req.region_id, req.scene_ids, req.aoi)
+        return selection_pixels(req.bounds, req.region_id, req.scene_ids, req.aoi, req.admin_code, req.admin_version)
     except (ValueError, KeyError) as exc:
         raise HTTPException(400, detail=str(exc)) from exc
     except (BoundaryUnavailable, OSError) as exc:
@@ -50,10 +54,16 @@ def fetch_local(req: LocalFetchRequest):
         raise HTTPException(400, detail='output_dir 必须是绝对路径')
     try:
         result = crop_images(req.bounds, req.start_date, req.end_date, req.max_images, req.output_dir,
-                             req.region_id, req.scene_ids, req.aoi)
+                             req.region_id, req.scene_ids, req.aoi, req.admin_code, req.admin_version)
         # Confirm the validated AOI so older workers cannot silently crop a box.
         if req.aoi is not None:
             result['aoi'] = req.aoi
+        if req.admin_code:
+            from app.fetchers.administrative import boundary_feature
+            feature = boundary_feature(req.admin_code, req.admin_version, req.region_id)
+            result['aoi'] = feature['geometry']
+            result['admin_code'] = req.admin_code
+            result['admin_version'] = feature['properties']['boundary_version']
         return result
     except BoundaryUnavailable as exc:
         raise HTTPException(503, detail=str(exc)) from exc
@@ -77,13 +87,27 @@ def list_catalog(refresh: bool = False):
 
 
 @router.get('/local/regions/{region_id}/scenes')
-def list_region_scenes(region_id: str, refresh: bool = False):
+def list_region_scenes(region_id: str, refresh: bool = False, admin_code: str | None = None):
     try:
         feature = region_feature(region_id)
         rows = sorted((row for row in catalog(refresh=refresh) if row.get('region_id') == region_id),
                       key=lambda row: (row.get('date', '9999'), row['file']))
+        phases = imagery_phases(rows, region_id)
+        if admin_code:
+            from app.fetchers.administrative import boundary_geometry
+            from shapely.geometry import box
+            try:
+                geometry = boundary_geometry(admin_code, source_id=region_id)
+            except ValueError as exc:
+                raise HTTPException(400, detail=str(exc)) from exc
+            rows = [row for row in rows if row.get('bounds') and geometry.intersection(box(*row['bounds'])).area > 0]
+            # The workspace loads whole source/month mosaics. Keep their original
+            # scene membership and version; county filtering only narrows candidates.
+            matches = {row['id'] for row in rows if row.get('available', True)}
+            phases = [{**phase, 'matching_scene_count': sum(row['id'] in matches for row in phase['scenes'])}
+                      for phase in phases if any(row['id'] in matches for row in phase['scenes'])]
         return {'region_id': region_id, 'name': feature['properties']['name'], 'scenes': rows,
-                'phases': imagery_phases(rows, region_id)}
+                'phases': phases}
     except KeyError as exc:
         raise HTTPException(404, detail='行政区不存在') from exc
     except (BoundaryUnavailable, OSError, ValueError) as exc:

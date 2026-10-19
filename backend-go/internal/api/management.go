@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"cdp/backend-go/internal/ai"
 	"cdp/backend-go/internal/model"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -86,6 +87,12 @@ func (m *Management) Sync(ctx context.Context) error {
 	}
 	return e
 }
+
+// ConfigureAI is called once the gateway is constructed and whenever settings
+// are activated through the management workflow.
+func (m *Management) ConfigureAI(s model.Settings) {
+	applyAIConfig(m.d.AI, s)
+}
 func (m *Management) sync(ctx context.Context) error {
 	r, e := m.d.DB.ActiveRevision()
 	if errors.Is(e, sql.ErrNoRows) {
@@ -97,6 +104,8 @@ func (m *Management) sync(ctx context.Context) error {
 		if e = m.d.Py.JSON(ctx, "GET", "/py/admin/bootstrap", nil, &b); e != nil {
 			return e
 		}
+		envAI := ai.ProviderConfigFromEnv()
+		b.Settings.AI = model.AISettings{APIBase: envAI.BaseURL, APIKey: envAI.APIKey, Model: envAI.Model, TimeoutMS: int(envAI.Timeout / time.Millisecond)}
 		if _, err := m.d.DB.Model("builtin-hebei"); errors.Is(err, sql.ErrNoRows) {
 			builtin := model.ManagedModel{ID: "builtin-hebei", Name: "河北变化检测", Path: b.Path, Hash: b.Hash, Status: "unvalidated", Mapping: map[string]string{}}
 			if e = m.d.DB.SaveModel(builtin); e != nil {
@@ -117,12 +126,14 @@ func (m *Management) sync(ctx context.Context) error {
 	if e != nil {
 		return e
 	}
+	r.Settings = defaultAISettings(r.Settings)
 	var status struct {
 		Revision int64 `json:"revision"`
 	}
 	if e = m.applyPython(ctx, r); e != nil {
 		return e
 	}
+	applyAIConfig(m.d.AI, r.Settings)
 	if e = m.d.Q.Configure(r.Settings.Runtime["workers"], r.Settings.Runtime["queue_capacity"]); e != nil {
 		return e
 	}
@@ -136,7 +147,56 @@ func (m *Management) sync(ctx context.Context) error {
 	return nil
 }
 func (m *Management) applyPython(ctx context.Context, r *model.Revision) error {
-	return m.d.Py.JSON(ctx, "POST", "/py/admin/apply", gin.H{"revision": r.ID, "settings": r.Settings}, nil)
+	return m.d.Py.JSON(ctx, "POST", "/py/admin/apply", gin.H{"revision": r.ID, "settings": pythonSettings(r.Settings)}, nil)
+}
+
+func pythonSettings(s model.Settings) any {
+	return gin.H{"sources": s.Sources, "default_model": s.DefaultModel, "detection": s.Detection, "runtime": s.Runtime, "tiles": s.Tiles, "browser": s.Browser}
+}
+
+func maskAPIKey(key string) string {
+	if key == "" {
+		return ""
+	}
+	if strings.Contains(key, "...") {
+		return key
+	}
+	if len(key) <= 8 {
+		return "********"
+	}
+	return key[:6] + "..." + key[len(key)-4:]
+}
+
+func redactedSettings(s model.Settings) model.Settings {
+	s.AI.APIKey = maskAPIKey(s.AI.APIKey)
+	return s
+}
+
+func mergeSecretSettings(next, old model.Settings) model.Settings {
+	if next.AI.APIKey == "" || strings.Contains(next.AI.APIKey, "...") {
+		next.AI.APIKey = old.AI.APIKey
+	}
+	return next
+}
+
+func applyAIConfig(g *ai.Gateway, s model.Settings) {
+	if g == nil {
+		return
+	}
+	timeout := time.Duration(s.AI.TimeoutMS) * time.Millisecond
+	if timeout <= 0 {
+		timeout = 45 * time.Second
+	}
+	g.ConfigureProvider(ai.ProviderConfig{BaseURL: strings.TrimRight(s.AI.APIBase, "/"), APIKey: s.AI.APIKey, Model: s.AI.Model, Timeout: timeout})
+}
+
+func defaultAISettings(s model.Settings) model.Settings {
+	if s.AI.APIBase != "" || s.AI.APIKey != "" || s.AI.Model != "" || s.AI.TimeoutMS != 0 {
+		return s
+	}
+	c := ai.ProviderConfigFromEnv()
+	s.AI = model.AISettings{APIBase: c.BaseURL, APIKey: c.APIKey, Model: c.Model, TimeoutMS: int(c.Timeout / time.Millisecond)}
+	return s
 }
 
 func localHost(value string) bool {
@@ -225,6 +285,7 @@ func (m *Management) register(api *gin.RouterGroup) {
 			c.JSON(503, gin.H{"error": e.Error()})
 			return
 		}
+		r.Settings = defaultAISettings(r.Settings)
 		history, e := m.d.DB.RevisionHistory()
 		if e != nil {
 			apiError(c, e)
@@ -236,7 +297,10 @@ func (m *Management) register(api *gin.RouterGroup) {
 		if info, ok := diagnostics.(map[string]any); ok {
 			effective = effective && info["revision"] == float64(r.ID)
 		}
-		c.JSON(200, gin.H{"revision": r.ID, "settings": r.Settings, "effective": effective, "error": m.lastError, "history": history, "diagnostics": gin.H{"queue": m.d.Q.Stats(), "python": diagnostics, "go_api_port": c.Request.Host, "python_url": m.d.Py.BaseURL, "database": filepath.Join(m.d.Cfg.DataDir, "meta.db")}})
+		for i := range history {
+			history[i].Settings = redactedSettings(history[i].Settings)
+		}
+		c.JSON(200, gin.H{"revision": r.ID, "settings": redactedSettings(r.Settings), "effective": effective, "error": m.lastError, "history": history, "diagnostics": gin.H{"queue": m.d.Q.Stats(), "python": diagnostics, "go_api_port": c.Request.Host, "python_url": m.d.Py.BaseURL, "database": filepath.Join(m.d.Cfg.DataDir, "meta.db")}})
 	})
 	g.GET("/settings/operations/:id", func(c *gin.Context) {
 		op, e := m.d.DB.Operation(c.Param("id"))
@@ -257,7 +321,7 @@ func (m *Management) register(api *gin.RouterGroup) {
 		}
 		m.operation(c, "validate", func(ctx context.Context) (any, error) {
 			var out any
-			e := m.d.Py.JSON(ctx, "POST", "/py/admin/validate", s, &out)
+			e := m.d.Py.JSON(ctx, "POST", "/py/admin/validate", pythonSettings(s), &out)
 			return out, e
 		})
 	})
@@ -289,16 +353,19 @@ func (m *Management) register(api *gin.RouterGroup) {
 			if e != nil {
 				return nil, e
 			}
+			old.Settings = defaultAISettings(old.Settings)
 			if old.ID != req.Expected {
 				return nil, fmt.Errorf("REVISION_CONFLICT: 配置已更新，请重新加载")
 			}
 			s := req.Settings
+			s = mergeSecretSettings(s, old.Settings)
 			if req.Rollback != 0 {
 				prior, e := m.d.DB.Revision(req.Rollback)
 				if e != nil {
 					return nil, e
 				}
 				s = prior.Settings
+				s = defaultAISettings(s)
 			}
 			mdl, e := m.d.DB.Model(s.DefaultModel)
 			if e != nil {
@@ -310,9 +377,10 @@ func (m *Management) register(api *gin.RouterGroup) {
 			var validated struct {
 				Settings model.Settings `json:"settings"`
 			}
-			if e = m.d.Py.JSON(ctx, "POST", "/py/admin/validate", s, &validated); e != nil {
+			if e = m.d.Py.JSON(ctx, "POST", "/py/admin/validate", pythonSettings(s), &validated); e != nil {
 				return nil, e
 			}
+			validated.Settings.AI = s.AI
 			s = validated.Settings
 			if s.Runtime["gpu_device"] != old.Settings.Runtime["gpu_device"] {
 				var report model.ManagedModel
@@ -348,6 +416,7 @@ func (m *Management) register(api *gin.RouterGroup) {
 				return nil, e
 			}
 			m.synced = id
+			applyAIConfig(m.d.AI, s)
 			m.lastError = ""
 			return gin.H{"revision": id}, nil
 		})

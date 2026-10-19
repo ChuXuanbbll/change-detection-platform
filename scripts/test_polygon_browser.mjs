@@ -24,6 +24,7 @@ try {
   await page.route('**/api/models', route => route.fulfill({ json: [{ id: 'fixture', name: 'Fixture', status: 'ready', enabled: true, sha256: 'fixture', mapping: {} }] }));
   await page.route('**/py/local/catalog*', route => route.fulfill({ json: { images: [], boundary: outer, bounds: [114.29, 38.09, 114.41, 38.21] } }));
   await page.route('**/py/local/regions', route => route.fulfill({ json: { type: 'FeatureCollection', features: [feature], boundary: outer, bounds: [114.29, 38.09, 114.41, 38.21] } }));
+  await page.route('**/api/administrative-regions?*', route => route.fulfill({ json: { features: new URL(route.request().url()).searchParams.get('level') === 'prefecture' ? [feature] : [] } }));
   await page.route('**/py/local/regions/fixture/scenes*', route => route.fulfill({ json: { region_id: 'fixture', name: '测试行政区', scenes: phases.flatMap(p => p.scenes), phases } }));
   await page.route('**/mosaic/**', route => route.fulfill({ contentType: 'image/png', body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGBgAAAABQABpfZFQAAAAABJRU5ErkJggg==', 'base64') }));
   await page.route('**/py/local/selection-pixels', route => {
@@ -39,7 +40,7 @@ try {
   const root = page.locator('[data-map-workspace]');
   const toolbar = page.getByRole('toolbar', { name: '地图工具' });
   const submit = page.locator('.submit-detection');
-  await page.getByRole('combobox', { name: '选择行政区' }).selectOption('fixture');
+  await page.getByRole('combobox', { name: '选择影像来源' }).selectOption('fixture');
   await page.getByRole('button', { name: '加入 2025-01 时相' }).click();
   await page.getByRole('button', { name: '加入 2025-03 时相' }).click();
   await page.waitForTimeout(900); // Wait for the existing city navigation animation.
@@ -220,7 +221,8 @@ try {
   const beforeNavigation = await geometry();
   await root.evaluate(node => {
     const s = node.__vueParentComponent.setupState;
-    if (!s.map.dragging.enabled() || !s.map.scrollWheelZoom.enabled() || !s.map.doubleClickZoom.enabled()) throw new Error('selection locks navigation');
+    if (!s.map.dragging.enabled() || !s.map.scrollWheelZoom.enabled()) throw new Error('selection locks navigation');
+    if (s.map.doubleClickZoom.enabled()) throw new Error('default double-click zoom conflicts with province navigation');
     s.map.setZoom(15, { animate: false });
   });
   const center = await root.evaluate(node => node.__vueParentComponent.setupState.map.getCenter());
@@ -294,7 +296,7 @@ try {
   await page.getByRole('button', { name: '河北全省', exact: true }).click();
   assert.equal(await geometry(), null);
   assert.ok(await submit.isDisabled());
-  await page.getByRole('combobox', { name: '选择行政区' }).selectOption('fixture');
+  await page.getByRole('combobox', { name: '选择影像来源' }).selectOption('fixture');
   await page.waitForTimeout(900);
   await start(); await click([114.305, 38.105]); await click([114.315, 38.105]); await click([114.31, 38.115]);
   await page.keyboard.press('Enter');

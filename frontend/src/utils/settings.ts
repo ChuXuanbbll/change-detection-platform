@@ -15,6 +15,13 @@ export interface Settings {
   runtime: Record<string, number>;
   tiles: Record<string, number>;
   browser: Record<string, number>;
+  ai: AISettings;
+}
+export interface AISettings {
+  api_base: string;
+  api_key: string;
+  model: string;
+  timeout_ms: number;
 }
 export interface ManagedModel {
   id: string;

@@ -42,7 +42,7 @@ Settings 包含 `sources/default_model/detection/runtime/tiles/browser`。字段
 
 ### 多边形选区
 
-`aoi` 为 WGS84 GeoJSON Polygon，坐标顺序 `[经度, 纬度]`，仅支持单个无孔闭合环。示例：
+手绘 `aoi` 为 WGS84 GeoJSON Polygon，坐标顺序 `[经度, 纬度]`，仅支持单个无孔闭合环。示例：
 
 ```json
 {"type":"Polygon","coordinates":[[[116.2573,39.4158],[116.2578,39.4158],[116.2573,39.4163],[116.2573,39.4158]]]}
@@ -55,6 +55,14 @@ Python `/py/local/fetch`、兼容的 `/py/wayback/fetch` 和 `/py/local/selectio
 多边形裁切响应额外返回已验证的 `aoi`；Go 对照请求检查该确认字段，缺失或不匹配返回 502 `AOI_NOT_CONFIRMED` 并清理失败批次。前端还核对每张裁切影像的 `meta_json.aoi/region_id`，防止旧 Go 服务忽略几何后继续提交矩形检测。矩形请求无需确认字段。
 
 裁切及检测产物仍为矩形 GeoTIFF，内部有效掩膜区分多边形外像元与区内有效黑色像元。最终变化和置信度栅格保留共同有效掩膜，区域外填零；变化比例和直方图仅统计共同有效像元。矢量结果描述按像元中心筛选后的像元覆盖范围。缩略图按有效掩膜透明显示；影像 `meta_json` 包含 `aoi/region_id/bounds`，其中 `bounds` 为实际裁切网格范围。
+
+### 县级行政区边界
+
+GET `/api/administrative-regions?level=province|prefecture|county&source_id=...` 查询共享 SQLite 知识库；GET `/api/administrative-regions/:code?version=...` 获取指定代码／版本的完整边界。来源、数据日期、特殊来源映射与更新方法见 [行政区知识库](administrative-boundaries.md)。
+
+县界检测在 POST `/api/images/local` 和 `/py/local/selection-pixels` 中传入 `admin_code`、`admin_version`，并使用所查边界的合法 `bounds`、对应 `region_id`（影像来源 ID）及 `scene_ids`。县界由服务端数据库解析，省略版本时冻结当前版本。允许该可信边界包含 MultiPolygon 和孔洞；如另传 `aoi`，必须与入库边界完全一致。来源／版本不匹配或轮廓被替换时拒绝；不允许用包围盒代替边界。裁切影像元数据保留 `admin_code/admin_version/aoi`，前端核对这些字段后才继续检测。
+
+GET `/py/local/regions/:source_id/scenes?admin_code=...` 返回与县界相交的候选月份。`matching_scene_count` 表示县内候选场景数；时相仍保留整个来源月份的场景集和版本，拖入行为不变。县区浏览不替换已加载时相或检测选区。
 
 ## 展示
 

@@ -26,13 +26,13 @@ const url = process.env.FRONTEND_URL || 'http://localhost:5173';
 try {
   await page.goto(url, { waitUntil: 'domcontentloaded' });
   await page.getByText('正在扫描影像目录，完成后即可加载时相…').waitFor();
-  const select = page.getByRole('combobox', { name: '选择行政区' });
+  const select = page.getByRole('combobox', { name: '选择影像来源' });
   await select.selectOption('130100');
   await select.selectOption('131000');
   assert.equal(scans.length, 1);
   assert.equal(scenes.length, 0, 'regional reads must wait for the page scan');
   release();
-  await page.getByText('该行政区没有影像时相。', { exact: true }).waitFor();
+  await page.getByText('当前影像来源在所选范围没有影像时相。', { exact: true }).waitFor();
   assert.equal(scenes.length, 1, 'aborted region selection cannot issue a late request');
   assert.ok(scenes[0].includes('/131000/scenes'));
   for (const target of ['comparison', 'reports', 'overview']) {
@@ -40,11 +40,11 @@ try {
     await page.waitForURL(`**/${target}`);
   }
   await select.selectOption('130100');
-  await page.getByText('该行政区没有影像时相。', { exact: true }).waitFor();
+  await page.getByText('当前影像来源在所选范围没有影像时相。', { exact: true }).waitFor();
   assert.equal(scans.length, 1, 'SPA and region changes do not refresh the index');
   assert.ok(scenes.every(value => !value.includes('refresh=true')));
   await page.getByRole('button', { name: '刷新目录', exact: true }).click();
-  await page.getByText('该行政区没有影像时相。', { exact: true }).waitFor();
+  await page.getByText('当前影像来源在所选范围没有影像时相。', { exact: true }).waitFor();
   assert.equal(scenes.filter(value => value.includes('refresh=true')).length, 1);
   await page.reload({ waitUntil: 'networkidle' });
   assert.equal(scans.length, 2, 'one additional scan on browser reload');

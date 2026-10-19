@@ -1,0 +1,150 @@
+id: result.inspect.v1
+version: 2.0.0
+max_steps: 12
+input_schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  additionalProperties: false
+  properties:
+    operation:
+      type: string
+      enum:
+      - query_tasks
+      - status
+      - summary
+      - filter
+      - export
+    query:
+      type: string
+      minLength: 1
+      maxLength: 256
+    status:
+      type: string
+      enum:
+      - pending
+      - queued
+      - running
+      - processing
+      - completed
+      - succeeded
+      - failed
+      - cancelled
+    latest:
+      type: boolean
+    use_workspace_context:
+      type: boolean
+    use_previous_result:
+      type: boolean
+    task_id:
+      type: string
+      minLength: 1
+      maxLength: 128
+    result_id:
+      type: string
+      minLength: 1
+      maxLength: 128
+    area_min:
+      type: number
+      minimum: 0
+    area_max:
+      type: number
+      minimum: 0
+    confidence_min:
+      type: number
+      minimum: 0
+      maximum: 1
+    limit:
+      type: integer
+      minimum: 1
+      maximum: 500
+    sort:
+      type: string
+      enum:
+      - area_desc
+      - confidence_desc
+      - newest
+    output_format:
+      type: string
+      enum:
+      - geojson
+      - csv
+      - shp
+      - tiff
+output_schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  additionalProperties: false
+  properties:
+    status:
+      type: string
+      enum:
+      - ok
+      - needs_clarification
+    task_id:
+      type: string
+    result_id:
+      type: string
+    count:
+      type: integer
+      minimum: 0
+      maximum: 100000
+    items:
+      type: array
+      maxItems: 500
+      items:
+        type: object
+        additionalProperties: false
+        properties:
+          id:
+            type: string
+          area_m2:
+            type: number
+          confidence_mean:
+            type: number
+    download_ref:
+      type: string
+allowed_tools:
+- workspace.context
+- task.search
+- task.status
+- result.summary
+- result.patches.query
+- result.export.prepare
+- ui.show_task
+- ui.show_result
+- ui.open_report
+steps:
+- id: context
+  tool: workspace.context
+- id: task
+  tool: task.search
+  requires:
+  - context
+- id: task_status
+  tool: task.status
+  requires:
+  - task
+- id: show_task
+  tool: ui.show_task
+  requires:
+  - task_status
+- id: summary
+  tool: result.summary
+  requires:
+  - task_status
+- id: patches
+  tool: result.patches.query
+  requires:
+  - summary
+- id: show_result
+  tool: ui.show_result
+  requires:
+  - summary
+- id: export
+  tool: result.export.prepare
+  requires:
+  - summary
+- id: open_report
+  tool: ui.open_report
+  requires:
+  - summary

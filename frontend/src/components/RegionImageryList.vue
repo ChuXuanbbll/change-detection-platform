@@ -22,15 +22,15 @@ function dragPhase(event: DragEvent, phase: ImageryPhase) {
 }
 </script>
 <template>
-  <section class="panel p-3 space-y-3 text-sm" aria-label="行政区影像列表">
+  <section class="panel p-3 space-y-3 text-sm" aria-label="影像来源列表">
     <header class="flex items-center justify-between gap-2">
-      <h3 class="text-cyan-400 font-semibold">{{ name || '行政区' }}影像</h3>
+      <h3 class="text-cyan-400 font-semibold">{{ name ? `${name}影像` : '影像来源' }}</h3>
       <button class="btn-ghost text-xs" :disabled="disabled || loading || !name" @click="emit('refresh')">刷新目录</button>
     </header>
     <p v-if="loading" role="status" class="text-cyan-300 text-xs">正在读取影像目录…</p>
     <p v-else-if="error" role="alert" class="text-rose-400 text-xs">{{ error }}</p>
-    <p v-else-if="!name" class="text-muted text-xs">点击地图行政区查看影像。</p>
-    <p v-else-if="!phases.length" class="text-muted text-xs">该行政区没有影像时相。</p>
+    <p v-else-if="!name" class="text-muted text-xs">点击地图选择影像来源。</p>
+    <p v-else-if="!phases.length" class="text-muted text-xs">当前影像来源在所选范围没有影像时相。</p>
     <div class="region-imagery-list">
       <details v-for="group in years" :key="group.year" class="imagery-year" open>
         <summary>{{ group.year }} 年 <span class="text-muted">{{ group.phases.length }} </span></summary>

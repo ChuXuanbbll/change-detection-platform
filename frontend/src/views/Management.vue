@@ -16,6 +16,7 @@ const expected = ref(0);
 const busy = ref(false);
 const message = ref('');
 const error = ref('');
+const newAIKey = ref('');
 const modelName = ref('');
 const modelPath = ref('');
 const upload = ref<File>();
@@ -44,7 +45,10 @@ const labels: Record<string, [string, string, number, number, number]> = {
 async function reload() {
   await refreshSettings();
   if (settingsState.value) {
-    draft.value = JSON.parse(JSON.stringify(settingsState.value.settings));
+    const next = JSON.parse(JSON.stringify(settingsState.value.settings)) as Settings;
+    next.ai ||= { api_base: '', api_key: '', model: '', timeout_ms: 45000 };
+    draft.value = next;
+    newAIKey.value = '';
     expected.value = settingsState.value.revision;
   }
 }
@@ -69,14 +73,17 @@ async function operation(path: string, data: unknown) {
 }
 function save(validate = false) {
   return run(async () => {
+    const payload = draft.value ? (JSON.parse(JSON.stringify(draft.value)) as Settings) : undefined;
+    if (payload?.ai && newAIKey.value.trim()) payload.ai.api_key = newAIKey.value.trim();
     const result = await operation(
       `/settings/${validate ? 'validate' : 'apply'}`,
-      validate ? draft.value : { expected_revision: expected.value, settings: draft.value },
+      validate ? payload : { expected_revision: expected.value, settings: payload },
     );
     if (validate && result) {
       const report = result as { scenes: number; available: number };
       message.value = `参数与目录校验通过：${report.scenes} 张影像，${report.available} 张可用；尚未应用`;
     }
+    if (!validate) newAIKey.value = '';
   }, !validate);
 }
 function addSource() {
@@ -140,7 +147,7 @@ onUnmounted(() => controller.abort());
     </div>
     <div role="tablist" aria-label="配置分类" class="management-tabs">
       <button
-        v-for="name in ['模型', '影像来源', '检测默认值', '性能与诊断']"
+        v-for="name in ['模型', '影像来源', '检测默认值', 'AI 配置', '性能与诊断']"
         :key="name"
         role="tab"
         :aria-selected="tab === name"
@@ -313,6 +320,44 @@ onUnmounted(() => controller.abort());
           >
         </div></template
       >
+      <template v-if="tab === 'AI 配置' && draft">
+        <p>
+          AI 服务配置只在本机管理入口维护。API key
+          不会回显完整内容，保存时留空或保留缩略值表示继续使用当前 key。
+        </p>
+        <div class="config-grid ai-config">
+          <label
+            >API 地址<input
+              v-model="draft.ai.api_base"
+              class="input"
+              placeholder="https://api.openai.com/v1"
+          /></label>
+          <label
+            >模型名称<input v-model="draft.ai.model" class="input" placeholder="gpt-4o-mini"
+          /></label>
+          <label
+            >请求超时（毫秒）<input
+              v-model.number="draft.ai.timeout_ms"
+              class="input"
+              type="number"
+              min="1000"
+              max="600000"
+              step="1000"
+          /></label>
+          <label
+            >API key<input
+              v-model="newAIKey"
+              class="input"
+              type="password"
+              autocomplete="new-password"
+              placeholder="sk-..."
+          /></label>
+        </div>
+        <small
+          >当前值：{{ settingsState?.settings.ai?.api_key || '未配置' }}。完整 key
+          只由后端保存并用于请求。</small
+        >
+      </template>
       <template v-if="tab === '性能与诊断' && draft"
         ><p>
           默认每台设备同时运行一个检测任务；增加并发可能耗尽显存。队列参数变更需要当前检测队列空闲。瓦片进程会排空并重建；浏览器缓存在当前批次结束后重建。

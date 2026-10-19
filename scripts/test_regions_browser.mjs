@@ -55,9 +55,9 @@ try {
       if (/\/(?:imagery|scenes)/.test(request.url())) imageryRequests.push(request.url());
     });
     await page.goto(url);
-    const nav = page.getByRole('region', { name: '行政区导航' });
+    const nav = page.getByRole('region', { name: '影像来源导航' });
     const paths = page.locator('[data-region-id]');
-    await paths.nth(13).waitFor();
+    await paths.nth(10).waitFor();
     assert.equal(await paths.count(), 14);
     assert.equal(await page.locator('.region-label').count(), 14);
     const labelsClear = await page.locator('.region-label span').evaluateAll(labels => labels.every(label => {
@@ -78,7 +78,7 @@ try {
     assert.equal(fit, true, 'province boundaries must fit inside the default viewport');
     await assertOverviewMinimum(page);
     const points = await regionPoints(page);
-    assert.equal(points.length, 14, 'every region must have a visible hover target');
+    assert.equal(points.length, 14, 'every imagery source region must have a visible hover target');
     const region = page.locator('[data-region-id="130100"]');
     const point = points.find(point => point.id === '130100');
     await page.mouse.move(point.x, point.y);
@@ -99,7 +99,7 @@ try {
     await page.screenshot({ path: path.join(output, `${name}-overview.png`), fullPage: true });
     const overviewBox = await region.boundingBox();
     await region.dispatchEvent('click');
-    const list = page.getByRole('region', { name: '行政区影像列表' });
+    const list = page.getByRole('region', { name: '影像来源列表' });
     await list.locator('[data-phase-id]').first().waitFor();
     await page.waitForTimeout(1000);
     assert.equal(await page.locator('.leaflet-tile').count(), 0, 'region selection waits for an explicit drag or add');
@@ -112,10 +112,10 @@ try {
     await nav.getByRole('button', { name: '河北全省' }).click();
     assert.equal(await page.locator('.leaflet-tile').count(), 0, 'return must remove imagery');
     await page.route('**/py/local/regions/130600/scenes*', route => route.fulfill({ json: { region_id: '130600', name: '保定市', scenes: [], phases: [] } }));
-    await page.getByRole('combobox', { name: '选择行政区' }).selectOption('130600');
-    await list.getByText('该行政区没有影像时相。', { exact: true }).waitFor();
+    await page.getByRole('combobox', { name: '选择影像来源' }).selectOption('130600');
+    await list.getByText('当前影像来源在所选范围没有影像时相。', { exact: true }).waitFor();
     assert.equal(await page.locator('.leaflet-tile').count(), 0);
-    await page.getByRole('combobox', { name: '选择行政区' }).selectOption('xiongan');
+    await page.getByRole('combobox', { name: '选择影像来源' }).selectOption('xiongan');
     await list.getByText('雄安新区影像', { exact: true }).waitFor();
     await list.locator('[data-phase-id]').first().waitFor();
     const xiongan = await (await page.request.get(`${url}/py/local/regions/xiongan/scenes`)).json();
@@ -131,27 +131,27 @@ try {
         await route.fulfill({ response });
       } catch { /* Aborted catalog requests are expected during rapid navigation. */ }
     });
-    await page.getByRole('combobox', { name: '选择行政区' }).selectOption('130100');
-    await page.getByRole('combobox', { name: '选择行政区' }).selectOption('131000');
+    await page.getByRole('combobox', { name: '选择影像来源' }).selectOption('130100');
+    await page.getByRole('combobox', { name: '选择影像来源' }).selectOption('131000');
     await list.getByText('廊坊市影像', { exact: true }).waitFor();
     await list.locator('[data-phase-id]').first().waitFor();
-    assert.equal(await page.getByRole('combobox', { name: '选择行政区' }).inputValue(), '131000');
+    assert.equal(await page.getByRole('combobox', { name: '选择影像来源' }).inputValue(), '131000');
     const langfang = await (await page.request.get(`${url}/py/local/regions/131000/scenes`)).json();
     assert.deepEqual(await list.locator('[data-phase-id]').evaluateAll(nodes => nodes.map(node => node.dataset.phaseId)), langfang.phases.map(phase => phase.id));
     await nav.getByRole('button', { name: '河北全省' }).click();
     const tileCount = tileRequests.length;
-    await page.getByRole('combobox', { name: '选择行政区' }).selectOption('130100');
+    await page.getByRole('combobox', { name: '选择影像来源' }).selectOption('130100');
     await page.waitForTimeout(1000);
     // Manual zooming back to the overview clears the region and all raster layers.
-    for (let i = 0; i < 12 && await page.getByRole('combobox', { name: '选择行政区' }).inputValue(); i++) {
+    for (let i = 0; i < 12 && await page.getByRole('combobox', { name: '选择影像来源' }).inputValue(); i++) {
       const zoomOut = page.getByRole('button', { name: 'Zoom out' });
       if (await zoomOut.getAttribute('aria-disabled') === 'true') break;
       // The preceding zoom can reach the floor between reading aria-disabled and clicking.
       await zoomOut.click({ force: true });
       await page.waitForTimeout(400);
     }
-    await page.waitForFunction(() => document.querySelector('select[aria-label="选择行政区"]')?.value === '');
-    assert.equal(await page.getByRole('combobox', { name: '选择行政区' }).inputValue(), '');
+    await page.waitForFunction(() => document.querySelector('select[aria-label="选择影像来源"]')?.value === '');
+    assert.equal(await page.getByRole('combobox', { name: '选择影像来源' }).inputValue(), '');
     assert.equal(await page.locator('.leaflet-tile').count(), 0);
     await assertOverviewMinimum(page);
     // A smaller viewport must lower the limit enough to retain the complete province.
@@ -194,7 +194,7 @@ try {
     document.body.append(host); createApp(MapBasemap).mount(host);
   });
   await page.locator('[data-region-id="131000"]').last().waitFor();
-  await page.getByRole('combobox', { name: '选择行政区' }).last().selectOption('131000');
+  await page.getByRole('combobox', { name: '选择影像来源' }).last().selectOption('131000');
   await page.waitForFunction(() => document.querySelectorAll('.leaflet-tile').length >= 3 &&
     [...document.querySelectorAll('.leaflet-tile')].every(image => image.complete && image.naturalWidth > 0));
   const xyz = requests.filter(request => request.pathname.includes('/xyz/'));

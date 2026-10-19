@@ -38,12 +38,14 @@ services:
     restart: unless-stopped
     volumes:
       - shared-data:/data
+      - ../data/boundaries:/opt/assets/boundaries:ro
     environment:
       GO_API_PORT: 8080
       GO_LISTEN_HOST: 0.0.0.0
       CDP_TRUST_LOCAL_PROXY: "1"
       PY_ALGO_URL: http://py-algo:8090
       DATA_DIR: /data
+      ASSET_DIR: /opt/assets
       UPLOAD_MAX_MB: 2048
     depends_on:
       init-data:
@@ -71,7 +73,7 @@ services:
       DATA_DIR: /data
       LOCAL_IMAGERY_DIR: /opt/assets/imagery
       ASSET_DIR: /opt/assets
-      HEBEI_BOUNDARY_FILE: /opt/assets/boundaries/hebei.geojson
+      HEBEI_BOUNDARY_FILE: /opt/assets/boundaries/hebei-administrative-province.geojson
       CHANGE_ONNX_PROVIDER: cuda
     deploy:
       resources:

@@ -37,7 +37,7 @@ const visibleTilesReady = () => page.waitForFunction(() => {
   const images = [...document.querySelectorAll('.leaflet-tile')].filter(image => getComputedStyle(image).visibility !== 'hidden');
   return images.length > 0 && images.every(image => image.complete && image.naturalWidth === 256);
 });
-const list = page.getByRole('region', { name: '行政区影像列表' });
+const list = page.getByRole('region', { name: '影像来源列表' });
 const view = () => page.locator('[data-map-workspace]').evaluate(node => {
   let component = node.__vueParentComponent;
   while (component && !component.exposed?.getView) component = component.parent;
@@ -54,7 +54,7 @@ try {
   await page.route('**/api/settings', route => route.fulfill({ json: { revision: 1, effective: true, settings: { default_model: 'fixture', detection: { threshold: .5, resolution: .8, kernel_size: 3, min_area_pixels: 10 }, browser: { concurrency: 4, inactive_layers: 3, cache_mb: 128, idle_seconds: 300 } } } }));
   await page.route('**/api/models', route => route.fulfill({ json: [{ id: 'fixture', name: 'Fixture', status: 'ready', enabled: true, sha256: 'fixture', mapping: {} }] }));
   await page.goto(url);
-  await page.getByRole('combobox', { name: '选择行政区' }).selectOption('xiongan');
+  await page.getByRole('combobox', { name: '选择影像来源' }).selectOption('xiongan');
   await list.locator('[data-phase-id]').first().waitFor();
   await page.waitForTimeout(1000);
   const data = await (await page.request.get(`${url}/py/local/regions/xiongan/scenes`)).json();
@@ -133,7 +133,7 @@ try {
     await route.fulfill({ json: { items: [], count: 0 } });
   });
   await page.getByRole('button', { name: '提交检测任务', exact: true }).click();
-  await page.waitForFunction(() => document.querySelector('select[aria-label="选择行政区"]')?.disabled);
+  await page.waitForFunction(() => document.querySelector('select[aria-label="选择影像来源"]')?.disabled);
   assert.deepEqual([...crops[0].scene_ids].sort(), [...january.scenes, ...march.scenes].filter(scene => scene.available).map(scene => scene.id).sort());
   assert.equal(crops[0].region_id, 'xiongan');
   assert.equal(await page.getByRole('button', { name: '关闭时相 2025-01' }).isDisabled(), true);
@@ -144,19 +144,19 @@ try {
     const map = node.__vueParentComponent.setupState.map;
     map.setZoom(map.getMinZoom(), { animate: false });
   });
-  assert.equal(await page.getByRole('combobox', { name: '选择行政区' }).inputValue(), 'xiongan', 'zooming to the floor cannot change regions during detection');
+  assert.equal(await page.getByRole('combobox', { name: '选择影像来源' }).inputValue(), 'xiongan', 'zooming to the floor cannot change regions during detection');
   assert.equal(await page.getByRole('tab').count(), 2);
   const lockedView = await view();
   await page.getByRole('tab', { name: /2025-01/ }).click();
   await checkView(lockedView);
   release();
   await page.getByText('该区域没有本地影像覆盖，请重新选择区域', { exact: true }).waitFor();
-  await page.getByRole('combobox', { name: '选择行政区' }).selectOption('130600');
+  await page.getByRole('combobox', { name: '选择影像来源' }).selectOption('130600');
   await list.getByText('保定市影像', { exact: true }).waitFor();
   assert.equal(await page.getByRole('tab').count(), 0);
   assert.equal(await page.locator('.leaflet-cdp-area-pane path').count(), 0);
   await page.route('**/py/local/regions/130800/scenes*', route => route.fulfill({ status: 503, json: { detail: '影像目录不可访问: Y:测试断开' } }));
-  await page.getByRole('combobox', { name: '选择行政区' }).selectOption('130800');
+  await page.getByRole('combobox', { name: '选择影像来源' }).selectOption('130800');
   await list.getByRole('alert').waitFor();
   assert.match(await list.getByRole('alert').innerText(), /目录不可访问/);
   assert.deepEqual(errors, []);

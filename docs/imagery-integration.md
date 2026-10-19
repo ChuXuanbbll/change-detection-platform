@@ -1,12 +1,12 @@
-# 河北行政区与兼容显示源
+# 河北影像来源与兼容显示源
 
-按 2026-10-12 的 `regions.py`、`MapBasemap.vue` 与工作区调用核对。当前概览按行政区添加月时相并请求合成瓦片，检测输入通过 [管理](MANAGEMENT.md) 登记；[本地影像](LOCAL_IMAGERY.md) 为检测数据主说明。
+当前概览按影像来源添加月时相并请求合成瓦片，检测输入通过 [管理](MANAGEMENT.md) 登记；[本地影像](LOCAL_IMAGERY.md) 为检测数据主说明。行政树、边界版本、县界检测及来源映射见 [县级行政区知识库](administrative-boundaries.md)。
 
 年度影像及外部显示接口仍保留在代码中，年度下拉框仅用于地图组件的非工作区分支。不要将其描述为当前概览主入口；是否接入主工作区或收缩兼容范围尚待用户选择。
 
 ## 区域键与边界
 
-地图显示 14 个区域的矢量边界与名称，点击区域定位；返回河北全省卸载当前区域图层。行政区导航不自动创建检测选区，需另行框选或绘制多边形。当前没有单景检测像元硬上限。
+默认导航保留 14 个影像来源，原有点击、拖入整月时相的业务流程保留。全省地图显示这 14 个来源区域的边界与名称，支持鼠标交互进入；进入来源后显示其县级边界与县区名。普通县区导航只定位和筛选候选，不改变已加载时相或选区；明确选择“以某县边界作为检测范围”后才替换选区。当前没有单景检测像元硬上限。
 
 | 名称 | region_id |
 |---|---|
@@ -27,22 +27,22 @@
 
 这是应用稳定键，不是统一地级行政区编码。定州、辛集使用县级代码；雄安为应用键。
 
-边界位于 `data/boundaries/hebei-regions.geojson`，EPSG:4326。DataV/AMap GCJ-02 快照经过逆变换、几何修复和省界裁剪；定州、辛集、雄安从父级范围扣除，保留廊坊飞地。雄安为容城、安新、雄县联合范围，不是精确规划范围。公共可视化边界不能替代测绘级边界。
+当前轮廓来自天地图 2025-09 公开行政区划快照，位于 `data/boundaries/hebei-administrative.geojson`，由 Go 离线导入共享 SQLite 知识库。`hebei-source-groups.geojson` 是按县级归属生成的 14 个来源轮廓，`hebei-administrative-province.geojson` 为同一版本省界。雄安来源是容城、安新、雄县联合范围，不是另行取得的规划范围。公共可视化边界不能替代测绘级边界。
 
-`regions-provenance.json` 记录源 URL、SHA-256 与处理方法。确需重建时从项目根目录运行：
+原 `hebei-regions.geojson`、DataV/AMap 快照及 `regions-provenance.json` 保留作历史参考。当前数据的来源 URL、响应 SHA-256、数据日期与采集日期记录在新快照中。离线重建来源与省界时从项目根目录运行：
 
 ```powershell
-backend-py/.venv-local/Scripts/python.exe scripts/prepare_hebei_regions.py
-# 仅需刷新上游快照时增加 --download。
+backend-py/.venv-local/Scripts/python.exe scripts/prepare_admin_boundaries.py
 ```
 
-重建会写边界资源，边界变更后需重启服务；本轮未执行。
+显式下载新版本的流程与校验条件见县级行政区知识库文档；边界变更后需重启服务导入并同步缓存。
 
 ## 当前主流程与兼容接口
 
 | 请求 | 用途与范围 |
 |---|---|
 | GET `/py/local/regions` | 区域 GeoJSON、省界与省范围 |
+| GET `/api/administrative-regions?level=county&source_id=...` | 共享知识库中的行政区边界；也支持 prefecture、province |
 | GET `/py/local/regions/{region_id}/scenes` | 当前主流程场景和同月 `phases`，支持 `?refresh=true` |
 | GET `/py/local/regions/{region_id}/mosaic/{z}/{x}/{y}.png?scene_ids=...&v=...` | 当前选定月时相合成瓦片 |
 | GET `/py/local/regions/{region_id}/imagery?year=2025` | 兼容年度显示源；省略 year 取最新可用年 |
